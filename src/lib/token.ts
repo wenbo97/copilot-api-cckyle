@@ -11,7 +11,21 @@ import { HTTPError } from "./error"
 import { state } from "./state"
 import { sleep } from "./utils"
 
-const VSCODE_PROXY_TOKEN_URL = "http://127.0.0.1:3774/token"
+const DEFAULT_VSCODE_PROXY_PORT = 18774
+
+function readVscodeProxyPort(): number {
+  const raw = process.env.VSCODE_PROXY_PORT
+  if (raw === undefined || raw === "") return DEFAULT_VSCODE_PROXY_PORT
+  const n = Number(raw)
+  if (Number.isInteger(n) && n >= 1 && n <= 65535) return n
+  consola.warn(
+    `Invalid VSCODE_PROXY_PORT="${raw}", using default ${DEFAULT_VSCODE_PROXY_PORT}`,
+  )
+  return DEFAULT_VSCODE_PROXY_PORT
+}
+
+const VSCODE_PROXY_PORT = readVscodeProxyPort()
+const VSCODE_PROXY_TOKEN_URL = `http://127.0.0.1:${VSCODE_PROXY_PORT}/token`
 
 const readGithubToken = () => fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
 
