@@ -31,9 +31,8 @@ export function translateToOpenAI(
 ): ChatCompletionsPayload {
   return {
     model: translateModelName(payload.model),
-    messages: translateAnthropicMessagesToOpenAI(
-      payload.messages,
-      payload.system,
+    messages: sanitizeTrailingAssistant(
+      translateAnthropicMessagesToOpenAI(payload.messages, payload.system),
     ),
     max_tokens: payload.max_tokens,
     stop: payload.stop_sequences,
@@ -44,6 +43,54 @@ export function translateToOpenAI(
     tools: translateAnthropicToolsToOpenAI(payload.tools),
     tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
   }
+}
+
+/**
+ * GitHub Copilot's Claude models (notably claude-opus-4.8) reject any request
+ * whose messages array ends with an assistant turn: HTTP 400 with
+ *   "This model does not support assistant message prefill.
+ *    The conversation must end with a user message."
+ *
+ * Anthropic's native API DOES allow that shape (assistant prefill). To stay
+ * compatible with clients that emit it (Claude Code 2.1+ interactive mode,
+ * agent frameworks doing trajectory replay, etc.), we sanitize the tail:
+ *
+ *   - assistant turn with empty/whitespace-only content AND no tool_calls
+ *       -> drop it entirely (a no-op turn upstream couldn't act on anyway)
+ *   - assistant turn with content but no tool_calls
+ *       -> append a synthetic user "continue" turn so the conversation ends
+ *          on user. The model treats this as a continuation cue.
+ *   - assistant turn with tool_calls
+ *       -> leave alone. This is a structural state the upstream tool-flow
+ *          path is supposed to handle; rewriting would corrupt the trace.
+ *
+ * See: github.com/anomalyco/opencode/issues/31247 (same root cause).
+ */
+function sanitizeTrailingAssistant(messages: Array<Message>): Array<Message> {
+  if (messages.length === 0) return messages
+  const tail = messages.at(-1)
+  if (tail.role !== "assistant") return messages
+
+  const hasToolCalls = (tail.tool_calls?.length ?? 0) > 0
+  if (hasToolCalls) return messages
+
+  const textContent = extractTextForSanitization(tail.content)
+  if (textContent.trim() === "") {
+    // Drop the empty/whitespace-only prefill.
+    return messages.slice(0, -1)
+  }
+
+  // Non-empty prefill: append a continuation user turn so the tail is user.
+  return [...messages, { role: "user", content: "continue" }]
+}
+
+function extractTextForSanitization(content: Message["content"]): string {
+  if (content === null) return ""
+  if (typeof content === "string") return content
+  return content
+    .filter((part): part is TextPart => part.type === "text")
+    .map((part) => part.text)
+    .join("")
 }
 
 function translateModelName(model: string): string {
