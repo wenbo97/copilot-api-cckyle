@@ -1,8 +1,6 @@
 # Copilot API (fork)
 
 > Fork of [**ericc-ch/copilot-api**](https://github.com/ericc-ch/copilot-api) — a reverse-engineered proxy that exposes GitHub Copilot as an OpenAI- and Anthropic-compatible API, usable as a backend for [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview).
->
-> The upstream project is **no longer maintained**. This fork keeps it working for Claude Code on Windows. For the full background — what the proxy is, Docker, npx, the complete CLI/endpoint reference, and the usage dashboard — **see the [upstream README](https://github.com/ericc-ch/copilot-api#readme)**. This file documents only what differs here.
 
 > [!WARNING]
 > Reverse-engineered and unsupported by GitHub. Excessive automated/bulk requests may trigger GitHub's abuse detection and get your Copilot access suspended. Use responsibly. See [GitHub Acceptable Use](https://docs.github.com/site-policy/acceptable-use-policies/github-acceptable-use-policies) and the [Copilot Terms](https://docs.github.com/site-policy/github-terms/github-terms-for-additional-products-and-features#github-copilot).
