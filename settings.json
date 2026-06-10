@@ -2,22 +2,23 @@
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "ANTHROPIC_BASE_URL": "http://localhost:4141",
-    "ANTHROPIC_MODEL": "claude-opus-4-7[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-opus-4-7",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-7[1m]",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-7[1m]",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4.7-xhigh",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-opus-4.7-xhigh",
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7",
+    "ANTHROPIC_MODEL": "claude-opus-4-7[1m]",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "88",
     "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-    "CLAUDE_CODE_EFFORT_LEVEL": "xhigh"
+    "CLAUDE_CODE_USE_POWERSHELL_TOOL":"1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-7[1m]"
   },
-  "permissions": {
-    "deny": [
-      "WebSearch"
-    ]
-  },
-  "model": "opus[1m]",
+  "enabledPlugins": {},
+  "extraKnownMarketplaces": {},
+  "forceLoginMethod": "console",
   "autoUpdatesChannel": "latest",
-  "skipDangerousModePermissionPrompt": true
+  "tui": "default",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "model": "opus"
 }
