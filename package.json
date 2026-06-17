@@ -24,7 +24,7 @@
   "scripts": {
     "auth": "bun run ./src/main.ts auth --account-type enterprise ",
     "build": "tsdown",
-    "dev": "bun run ./src/main.ts start --account-type enterprise --trace --verbose",
+    "dev": "bun run ./src/main.ts start --account-type enterprise --trace",
     "dev-debug": "npx tsx ./src/main.ts start --account-type enterprise",
     "knip": "knip-bun",
     "lint": "eslint --cache",
