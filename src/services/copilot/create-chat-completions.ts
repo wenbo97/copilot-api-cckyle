@@ -1,7 +1,5 @@
 import { events } from "fetch-event-stream"
 
-import { state } from "~/lib/state"
-
 import { copilotFetch } from "./copilot-fetch"
 
 export const createChatCompletions = async (
@@ -137,6 +135,7 @@ export interface ChatCompletionsPayload {
     | { type: "function"; function: { name: string } }
     | null
   user?: string | null
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null
 }
 
 export interface Tool {
