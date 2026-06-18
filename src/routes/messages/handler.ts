@@ -15,6 +15,9 @@ import {
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import { createMessages } from "~/services/copilot/create-messages"
+import { createResponses } from "~/services/copilot/create-responses"
+
+import type { ResponseStreamEvent } from "../responses/responses-types"
 
 import {
   type AnthropicMessagesPayload,
@@ -25,6 +28,14 @@ import {
   translateToAnthropic,
   translateToOpenAI,
 } from "./non-stream-translation"
+import {
+  createResponsesToAnthropicState,
+  translateResponsesEventToAnthropicEvents,
+} from "./responses-stream-translation"
+import {
+  translateAnthropicToResponses,
+  translateResponsesToAnthropic,
+} from "./responses-translation"
 import { translateChunkToAnthropicEvents } from "./stream-translation"
 
 export async function handleCompletion(c: Context) {
@@ -56,6 +67,14 @@ export async function handleCompletion(c: Context) {
   // usage details the Messages->ChatCompletions->Messages round-trip would drop.
   if (modelSupportsEndpoint(anthropicPayload.model, "/v1/messages")) {
     return handlePassthroughMessages(c, anthropicPayload)
+  }
+
+  // Else if the model is /responses-native (gpt-5.5, gpt-5.3-codex), bridge
+  // Anthropic Messages <-> OpenAI Responses so Claude Code can reach it. This is
+  // a documented-lossy cross-protocol path (reasoning original text is encrypted
+  // by the backend; cache_control / strict tools / top_k do not map).
+  if (modelSupportsEndpoint(anthropicPayload.model, "/responses")) {
+    return handleCompletionViaResponses(c, anthropicPayload)
   }
 
   // Trace the original Anthropic request
@@ -205,3 +224,77 @@ async function handlePassthroughMessages(
 const isMessagesNonStreaming = (
   response: Awaited<ReturnType<typeof createMessages>>,
 ): response is AnthropicResponse => Object.hasOwn(response, "type")
+
+/**
+ * Bridge Claude Code (/v1/messages) to a /responses-native model (gpt-5.5,
+ * gpt-5.3-codex). Translates the Anthropic request into a Responses request,
+ * calls the native /responses egress, then translates the Responses result
+ * back into Anthropic shape. Documented-lossy: reasoning original text is
+ * dropped (backend-encrypted), as are cache_control / strict tools / top_k.
+ */
+async function handleCompletionViaResponses(
+  c: Context,
+  payload: AnthropicMessagesPayload,
+) {
+  const responsesPayload = translateAnthropicToResponses(payload)
+
+  const traceTimestamp = await traceRequest({
+    type: "anthropic-via-responses",
+    original: payload,
+    translated: responsesPayload,
+  })
+
+  if (state.manualApprove) await awaitApproval()
+
+  const response = await createResponses(responsesPayload)
+
+  if (isResponsesNonStreaming(response)) {
+    const anthropicResponse = translateResponsesToAnthropic(
+      response,
+      payload.model,
+    )
+    await traceResponse(
+      {
+        type: "anthropic-via-responses",
+        responses: response,
+        translated: anthropicResponse,
+      },
+      traceTimestamp,
+    )
+    return c.json(anthropicResponse)
+  }
+
+  consola.debug("Streaming response via Responses bridge")
+  return streamSSE(c, async (stream) => {
+    const streamState = createResponsesToAnthropicState(payload.model)
+    const streamTracer = new StreamTracer(traceTimestamp)
+
+    for await (const rawEvent of response) {
+      if (rawEvent.data === "[DONE]") break
+      if (!rawEvent.data) continue
+
+      const responsesEvent = JSON.parse(rawEvent.data) as ResponseStreamEvent
+      const events = translateResponsesEventToAnthropicEvents(
+        responsesEvent,
+        streamState,
+      )
+
+      for (const event of events) {
+        streamTracer.addChunk({ responses: responsesEvent, anthropic: event })
+        await stream.writeSSE({
+          event: event.type,
+          data: JSON.stringify(event),
+        })
+      }
+    }
+
+    await streamTracer.finish()
+  })
+}
+
+// The native /responses egress returns a ResponseObject (has an `output` array)
+// when non-streaming, or an async SSE-event iterator when streaming.
+const isResponsesNonStreaming = (
+  response: Awaited<ReturnType<typeof createResponses>>,
+): response is Extract<typeof response, { output: unknown }> =>
+  Object.hasOwn(response, "output")

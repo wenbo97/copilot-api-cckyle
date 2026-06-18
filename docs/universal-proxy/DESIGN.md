@@ -5,10 +5,10 @@
 > through the existing single-backend (GitHub Copilot) proxy, with **all reasoning/thinking levels** working.
 > Backend stays Copilot-only. This is *client universality*, not multi-vendor routing.
 
-Status: **Phase 0 + P0 foundation + Phase A (CC→Claude lossless passthrough) implemented & live-verified (2026-06-18).**
+Status: **All four client→model paths implemented & live-verified (2026-06-18).** The universal proxy goal is met.
 - **P0**: `/responses`-only models (`gpt-5.3-codex`, `gpt-5.5`) reachable for the **Codex** `/v1/responses` client via native passthrough.
-- **Phase A**: **Claude Code → Claude** now uses native `/v1/messages` passthrough — **lossless** (thinking blocks, `signature_delta`, `cache_creation` survive), replacing the old lossy Messages→ChatCompletions→Messages round-trip.
-- **Next: Phase B** — CC → gpt-5.5/codex (Messages→Responses bridge), the one remaining (lossy, cross-protocol) path.
+- **Phase A**: **Claude Code → Claude** uses native `/v1/messages` passthrough — **lossless** (thinking blocks, `signature_delta`, `cache_creation` survive), replacing the old lossy Messages→ChatCompletions→Messages round-trip.
+- **Phase B**: **Claude Code → gpt-5.5 / gpt-5.3-codex** via a Messages⇄Responses bridge (lossy, cross-protocol; effort mapped + per-model clamped so codex never gets `max`).
 
 Everything below is **captured from the live enterprise account via the VS Code token bridge
 on 2026-06-18**, not guessed. Raw evidence: [`fixtures/raw-copilot-catalog.enterprise.json`](../../fixtures/raw-copilot-catalog.enterprise.json).
@@ -25,7 +25,7 @@ passthrough-vs-unified split and Anthropic's own OpenAI-compat limitations table
 |---|---|---|---|---|
 | **Codex → GPT** (5.5 / 5.3-codex / 5.4) | Responses→Responses | ✅ **lossless** | native `/responses` passthrough (P0) | none |
 | **CC → Claude** (full series) | Messages→Messages | ✅ **lossless** | native `/v1/messages` passthrough (Phase A) | none¹ |
-| **CC → GPT** (5.5 / 5.3-codex) | Messages→Responses | ⚠️ **lossy** | translate bridge (Phase B, planned) | reasoning original text²; cache_control; `strict` tools; `top_k` |
+| **CC → GPT** (5.5 / 5.3-codex) | Messages→Responses | ⚠️ **lossy** | translate bridge (Phase B) | reasoning original text²; cache_control; `strict` tools; `top_k` |
 | **Codex → Claude** | Responses→Messages | ⚠️ **lossy** | existing translate-down | reasoning original text²; cache_control |
 
 ¹ One request-side adaptation, **not** a loss: Copilot's native `/v1/messages` rejects Anthropic's standard

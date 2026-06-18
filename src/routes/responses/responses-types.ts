@@ -3,6 +3,14 @@
 
 // --- Request types ---
 
+export type ReasoningEffort =
+  | "none"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+
 export interface ResponsesPayload {
   model: string
   input: string | Array<ResponseInputItem>
@@ -18,7 +26,7 @@ export interface ResponsesPayload {
     | "required"
     | { type: "function"; name: string }
   previous_response_id?: string
-  reasoning?: { effort?: "low" | "medium" | "high" }
+  reasoning?: { effort?: ReasoningEffort }
   metadata?: Record<string, string>
 }
 
@@ -61,7 +69,7 @@ export interface ResponseObject {
   model: string
   status: "completed" | "failed" | "incomplete" | "in_progress"
   output: Array<ResponseOutputItem>
-  usage: ResponseUsage
+  usage?: ResponseUsage
   metadata?: Record<string, string>
   error?: { code: string; message: string } | null
 }
@@ -69,6 +77,7 @@ export interface ResponseObject {
 export type ResponseOutputItem =
   | ResponseOutputMessage
   | ResponseOutputFunctionCall
+  | ResponseOutputReasoning
 
 export interface ResponseOutputMessage {
   type: "message"
@@ -76,6 +85,16 @@ export interface ResponseOutputMessage {
   role: "assistant"
   status: "completed"
   content: Array<ResponseOutputContent>
+}
+
+// Reasoning items are emitted by /responses-native models (gpt-5.x, codex).
+// Their content/text is encrypted by the backend (empty `content`, opaque `id`),
+// so consumers skip them — they exist in the type so narrowing is honest.
+export interface ResponseOutputReasoning {
+  type: "reasoning"
+  id: string
+  content: Array<unknown>
+  encrypted_content?: string
 }
 
 export type ResponseOutputContent = ResponseOutputText
