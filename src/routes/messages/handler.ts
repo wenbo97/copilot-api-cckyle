@@ -174,6 +174,8 @@ async function handlePassthroughMessages(
   c: Context,
   payload: AnthropicMessagesPayload,
 ) {
+  consola.info(`[Anthropic] Using model: "${payload.model}" (passthrough)`)
+
   const traceTimestamp = await traceRequest({
     type: "anthropic-passthrough",
     original: payload,
@@ -236,6 +238,10 @@ async function handleCompletionViaResponses(
   c: Context,
   payload: AnthropicMessagesPayload,
 ) {
+  consola.info(
+    `[Anthropic→Responses] Using model: "${payload.model}" (responses bridge)`,
+  )
+
   const responsesPayload = translateAnthropicToResponses(payload)
 
   const traceTimestamp = await traceRequest({
