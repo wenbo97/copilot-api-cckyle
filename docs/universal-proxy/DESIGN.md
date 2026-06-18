@@ -5,11 +5,35 @@
 > through the existing single-backend (GitHub Copilot) proxy, with **all reasoning/thinking levels** working.
 > Backend stays Copilot-only. This is *client universality*, not multi-vendor routing.
 
-Status: **Phase 0 (ground truth) complete. P0 foundation implemented + live-verified (2026-06-18).**
-The `/responses`-only models (`gpt-5.3-codex`, `gpt-5.5`) are now reachable for the Codex `/v1/responses`
-client via native passthrough; CC → Claude is unchanged. Next: P1.1 (Anthropic Messages → Responses bridge
-for Claude Code). Everything below is **captured from the live enterprise account via the VS Code token bridge
+Status: **Phase 0 + P0 foundation + Phase A (CC→Claude lossless passthrough) implemented & live-verified (2026-06-18).**
+- **P0**: `/responses`-only models (`gpt-5.3-codex`, `gpt-5.5`) reachable for the **Codex** `/v1/responses` client via native passthrough.
+- **Phase A**: **Claude Code → Claude** now uses native `/v1/messages` passthrough — **lossless** (thinking blocks, `signature_delta`, `cache_creation` survive), replacing the old lossy Messages→ChatCompletions→Messages round-trip.
+- **Next: Phase B** — CC → gpt-5.5/codex (Messages→Responses bridge), the one remaining (lossy, cross-protocol) path.
+
+Everything below is **captured from the live enterprise account via the VS Code token bridge
 on 2026-06-18**, not guessed. Raw evidence: [`fixtures/raw-copilot-catalog.enterprise.json`](../../fixtures/raw-copilot-catalog.enterprise.json).
+
+---
+
+## Fidelity matrix (lossless vs lossy, per path)
+
+"Lossless" is achievable only by **passthrough** (no translation), which requires **client protocol ==
+model's native protocol**. Cross-protocol paths are structurally lossy — confirmed against LiteLLM's
+passthrough-vs-unified split and Anthropic's own OpenAI-compat limitations table.
+
+| Client → Model | Protocols | Fidelity | Mechanism | Known loss |
+|---|---|---|---|---|
+| **Codex → GPT** (5.5 / 5.3-codex / 5.4) | Responses→Responses | ✅ **lossless** | native `/responses` passthrough (P0) | none |
+| **CC → Claude** (full series) | Messages→Messages | ✅ **lossless** | native `/v1/messages` passthrough (Phase A) | none¹ |
+| **CC → GPT** (5.5 / 5.3-codex) | Messages→Responses | ⚠️ **lossy** | translate bridge (Phase B, planned) | reasoning original text²; cache_control; `strict` tools; `top_k` |
+| **Codex → Claude** | Responses→Messages | ⚠️ **lossy** | existing translate-down | reasoning original text²; cache_control |
+
+¹ One request-side adaptation, **not** a loss: Copilot's native `/v1/messages` rejects Anthropic's standard
+`thinking:{type:"enabled",budget_tokens}` and requires `{type:"adaptive"}` + `output_config.effort`. The
+egress maps that one field (budget→clamped effort); the response is forwarded untouched.
+² **Structural, not a proxy defect:** reasoning original text is **never** exposed by the backend — it returns
+`{content:[], id:"<encrypted>"}` (verified in traces). OpenAI/Anthropic only round-trip it as opaque
+`encrypted_content` **within the same protocol**, so any cross-protocol translation necessarily drops it.
 
 ---
 
