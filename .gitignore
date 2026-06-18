@@ -20,3 +20,9 @@ tests/_runlog/
 
 traces/
 traces-*/
+
+doc/
+
+# CodeGraph local index (db/wal/logs) — keep only .codegraph/.gitignore
+.codegraph/*
+!.codegraph/.gitignore
