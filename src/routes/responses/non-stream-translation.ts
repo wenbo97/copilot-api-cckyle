@@ -97,16 +97,20 @@ function translateContent(
 }
 
 function translateTools(
-  tools?: Array<Record<string, unknown>>,
+  tools?: ResponsesPayload["tools"],
 ): Array<Tool> | undefined {
   if (!tools) return undefined
   const result: Array<Tool> = []
-  for (const t of tools) {
+  for (const tool of tools) {
+    // `payload` is unvalidated JSON, so inspect each tool as a loose record to
+    // tolerate either the Responses ({ name, parameters }) or a stray
+    // Chat-Completions ({ function: { name } }) shape.
+    const t = tool as unknown as Record<string, unknown>
     // Chat Completions format: { type: "function", function: { name, ... } }
     if (t.function && typeof t.function === "object") {
       const fn = t.function as Record<string, unknown>
       if (fn.name && typeof fn.name === "string") {
-        result.push(t as unknown as Tool)
+        result.push(tool as unknown as Tool)
         continue
       }
     }

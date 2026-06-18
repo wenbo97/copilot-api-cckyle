@@ -113,7 +113,7 @@ export function mapThinkingToReasoningEffort(
 function sanitizeTrailingAssistant(messages: Array<Message>): Array<Message> {
   if (messages.length === 0) return messages
   const tail = messages.at(-1)
-  if (tail.role !== "assistant") return messages
+  if (!tail || tail.role !== "assistant") return messages
 
   const hasToolCalls = (tail.tool_calls?.length ?? 0) > 0
   if (hasToolCalls) return messages

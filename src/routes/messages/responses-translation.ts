@@ -13,7 +13,9 @@ import type {
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
+  AnthropicTextBlock,
   AnthropicTool,
+  AnthropicToolResultBlock,
 } from "./anthropic-types"
 
 import { mapThinkingToReasoningEffort } from "./non-stream-translation"
@@ -123,14 +125,14 @@ function translateMessagesToInput(
 }
 
 function stringifyToolResult(
-  content: string | Array<Record<string, unknown>>,
+  content: AnthropicToolResultBlock["content"],
 ): string {
   if (typeof content === "string") return content
   // Anthropic tool_result content can be an array of blocks; concatenate any
   // text, else JSON-encode so nothing is silently lost.
   const text = content
-    .filter((b) => b.type === "text" && typeof b.text === "string")
-    .map((b) => b.text as string)
+    .filter((b): b is AnthropicTextBlock => b.type === "text")
+    .map((b) => b.text)
     .join("\n")
   return text || JSON.stringify(content)
 }
