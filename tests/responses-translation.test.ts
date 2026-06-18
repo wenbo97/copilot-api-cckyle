@@ -150,6 +150,32 @@ describe("translateAnthropicToResponses (request)", () => {
     expect(translateAnthropicToResponses(payload).reasoning).toBeUndefined()
   })
 
+  test("encodes assistant text as output_text and user text as input_text (multi-turn)", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-5.5",
+      max_tokens: 50,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "hello there" }],
+        },
+        { role: "user", content: [{ type: "text", text: "who are you?" }] },
+      ],
+    }
+    const out = translateAnthropicToResponses(payload)
+    const items = out.input as Array<{
+      role: string
+      content: Array<{ type: string; text: string }>
+    }>
+    // Responses API rule: user/system/developer content parts use input_text;
+    // assistant content parts must use output_text (input_text -> 400). This is
+    // why every conversation past the first turn failed before the fix.
+    expect(items[0].content[0].type).toBe("input_text")
+    expect(items[1].content[0].type).toBe("output_text")
+    expect(items[2].content[0].type).toBe("input_text")
+  })
+
   test("drops thinking blocks (no replayed reasoning text)", () => {
     const payload: AnthropicMessagesPayload = {
       model: "gpt-5.5",

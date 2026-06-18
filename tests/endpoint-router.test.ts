@@ -46,6 +46,7 @@ const fixtureModels = {
       },
     },
     { id: "no-endpoints" }, // model with the field absent entirely
+    { id: "gpt-5.7" }, // gpt-5 family; catalog omits supported_endpoints (enterprise reality)
   ],
 } as unknown as ModelsResponse
 
@@ -81,14 +82,30 @@ describe("modelSupportsEndpoint", () => {
     expect(modelSupportsEndpoint("does-not-exist", "/responses")).toBe(false)
   })
 
-  test("returns false when supported_endpoints is absent", () => {
+  test("returns false when a non-responses-only model omits the field", () => {
     state.models = fixtureModels
+    // `no-endpoints` is not a gpt-5/codex id, so the inference does not apply.
     expect(modelSupportsEndpoint("no-endpoints", "/responses")).toBe(false)
   })
 
-  test("returns false when the catalog has not loaded yet", () => {
+  test("infers /responses for a gpt-5 model when the catalog omits the field", () => {
+    state.models = fixtureModels
+    // Enterprise catalogs return no supported_endpoints array at all; the router
+    // must still route gpt-5.x to /responses or the bridge 400s on /chat/completions.
+    expect(modelSupportsEndpoint("gpt-5.7", "/responses")).toBe(true)
+    // The inference is scoped to /responses only — never invents other endpoints.
+    expect(modelSupportsEndpoint("gpt-5.7", "/chat/completions")).toBe(false)
+  })
+
+  test("infers /responses for a responses-only model when the catalog has not loaded yet", () => {
     state.models = undefined
-    expect(modelSupportsEndpoint("gpt-5.3-codex", "/responses")).toBe(false)
+    // Before the catalog loads we still route known responses-only ids correctly.
+    expect(modelSupportsEndpoint("gpt-5.3-codex", "/responses")).toBe(true)
+  })
+
+  test("returns false for an unknown model when the catalog has not loaded yet", () => {
+    state.models = undefined
+    expect(modelSupportsEndpoint("does-not-exist", "/responses")).toBe(false)
   })
 })
 
