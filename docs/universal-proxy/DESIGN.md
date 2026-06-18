@@ -34,6 +34,8 @@ egress maps that one field (budget→clamped effort); the response is forwarded 
 ² **Structural, not a proxy defect:** reasoning original text is **never** exposed by the backend — it returns
 `{content:[], id:"<encrypted>"}` (verified in traces). OpenAI/Anthropic only round-trip it as opaque
 `encrypted_content` **within the same protocol**, so any cross-protocol translation necessarily drops it.
+Substantiated by two adversarially-verified research rounds (45 sources, zero counterexamples) + live
+byte-level probes against the real backend — see [`cross-protocol-reasoning-research.md`](./cross-protocol-reasoning-research.md).
 
 ---
 
@@ -121,7 +123,7 @@ model's `supported_endpoints`. Everything else is inbound translation, the prove
 - **P0.1 ✅** Expose `supported_endpoints` + `capabilities.supports.reasoning_effort` through `getModels()`
   typing (`services/copilot/get-models.ts`) and surface `supported_endpoints` in `routes/models/route.ts`.
 - **P0.2 ✅** `services/copilot/create-responses.ts` — native `POST /responses` egress through the existing
-  `copilotFetch` chokepoint (keeps 401-retry; diverges from PR #219's raw `fetch`). Streaming + non-streaming.
+  `copilotFetch` chokepoint (keeps 401-retry). Streaming + non-streaming.
 - **P0.3 ✅** Endpoint router `lib/endpoint-router.ts` — `modelSupportsEndpoint(model, "/responses")` reads the
   catalog from `state.models`.
 - **P0.4 ✅** Codex `/v1/responses` handler: passthrough (no translate) when the target model is
@@ -159,8 +161,6 @@ Matrix to smoke-test end-to-end through the real backend:
 - [x] **Raw Codex `/responses` request wire shape** — captured 2026-06-18 via the passthrough trace on :4142
       (`responses-passthrough` `.req`/`.resp` pairs, incl. a streaming tool-call response). Note: these were
       driven by `curl`, not the real Codex CLI — a genuine Codex-CLI capture is still ideal for P1.1 fidelity.
-- [x] **PR #219 exact native-forward code** — re-captured (`gh` now authenticated). We deliberately diverged:
-      route through `copilotFetch` (preserves 401-retry) instead of #219's raw `fetch`.
 - [ ] **What `ws:/responses` implies** — websocket variant; plain `POST /responses` proven sufficient for
       non-streaming **and** SSE streaming this session. `ws:` not needed for current clients.
 
