@@ -83,7 +83,7 @@ function translateContent(
   if (typeof content === "string") return content
 
   return content.map((part): ContentPart => {
-    if (part.type === "input_text") {
+    if (part.type === "input_text" || part.type === "output_text") {
       return { type: "text", text: part.text }
     }
     return {

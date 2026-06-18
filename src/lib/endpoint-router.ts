@@ -13,15 +13,37 @@ import { state } from "./state"
  * own preference. Endpoints are matched exactly, with the leading slash as the
  * catalog stores them (e.g. `"/responses"`, NOT `"responses"`).
  */
+// Fallback for catalogs that omit `supported_endpoints` entirely (the enterprise
+// backend currently returns no such array on any model). These id patterns mark
+// the /responses-only families — the gpt-5.x reasoning line and the codex models
+// — which 400 with `unsupported_api_for_model` on /chat/completions. Without this
+// the missing array makes modelSupportsEndpoint() report false for /responses, so
+// the routers translate these down to /chat/completions and the backend rejects.
+const RESPONSES_ONLY_ID_PATTERNS = [/^gpt-5/i, /codex/i]
+
+function inferResponsesOnly(modelId: string): boolean {
+  return RESPONSES_ONLY_ID_PATTERNS.some((re) => re.test(modelId))
+}
+
 export function modelSupportsEndpoint(
   modelId: string,
   endpoint: string,
 ): boolean {
-  return (
-    state.models?.data
-      .find((model) => model.id === modelId)
-      ?.supported_endpoints?.includes(endpoint) ?? false
-  )
+  const endpoints = state.models?.data.find(
+    (model) => model.id === modelId,
+  )?.supported_endpoints
+
+  // Authoritative when the catalog actually advertises the endpoint set.
+  if (endpoints && endpoints.length > 0) {
+    return endpoints.includes(endpoint)
+  }
+
+  // Catalog omitted the array — infer /responses support for known responses-only
+  // models so the Claude Code bridge and Codex passthrough route correctly.
+  if (endpoint === "/responses") {
+    return inferResponsesOnly(modelId)
+  }
+  return false
 }
 
 // Effort ordering, weakest to strongest. The catalog advertises a per-model

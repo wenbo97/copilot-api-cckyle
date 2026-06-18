@@ -46,8 +46,13 @@ export interface ResponseInputFunctionCallOutput {
   output: string
 }
 
+// Content parts carried by an input *message* item. The text variant differs by
+// role: user/system/developer messages use `input_text`, assistant messages use
+// `output_text` (the backend 400s on an `input_text` part inside an assistant
+// message). `input_image` only applies to user input.
 export type ResponseInputContentPart =
   | { type: "input_text"; text: string }
+  | { type: "output_text"; text: string }
   | { type: "input_image"; image_url: string; detail?: "low" | "high" | "auto" }
 
 // --- Tool types ---

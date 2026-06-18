@@ -79,7 +79,15 @@ function translateMessagesToInput(
     for (const block of message.content) {
       switch (block.type) {
         case "text": {
-          contentParts.push({ type: "input_text", text: block.text })
+          // Role decides the part type: assistant history must use output_text,
+          // user/system input uses input_text. Sending input_text inside an
+          // assistant message makes the Responses backend 400, which broke every
+          // conversation past the first turn.
+          contentParts.push(
+            message.role === "assistant" ?
+              { type: "output_text", text: block.text }
+            : { type: "input_text", text: block.text },
+          )
           break
         }
         case "image": {
