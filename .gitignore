@@ -19,3 +19,4 @@ dist/
 tests/_runlog/
 
 traces/
+traces-*/

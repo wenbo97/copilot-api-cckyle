@@ -5,9 +5,11 @@
 > through the existing single-backend (GitHub Copilot) proxy, with **all reasoning/thinking levels** working.
 > Backend stays Copilot-only. This is *client universality*, not multi-vendor routing.
 
-Status: **Phase 0 (ground truth) complete.** No code changes yet. Implementation pending (Phase 1+).
-Everything below is **captured from the live enterprise account via the VS Code token bridge on 2026-06-18**,
-not guessed. Raw evidence: [`fixtures/raw-copilot-catalog.enterprise.json`](../../fixtures/raw-copilot-catalog.enterprise.json).
+Status: **Phase 0 (ground truth) complete. P0 foundation implemented + live-verified (2026-06-18).**
+The `/responses`-only models (`gpt-5.3-codex`, `gpt-5.5`) are now reachable for the Codex `/v1/responses`
+client via native passthrough; CC → Claude is unchanged. Next: P1.1 (Anthropic Messages → Responses bridge
+for Claude Code). Everything below is **captured from the live enterprise account via the VS Code token bridge
+on 2026-06-18**, not guessed. Raw evidence: [`fixtures/raw-copilot-catalog.enterprise.json`](../../fixtures/raw-copilot-catalog.enterprise.json).
 
 ---
 
@@ -91,15 +93,16 @@ model's `supported_endpoints`. Everything else is inbound translation, the prove
 
 ## 3. Work breakdown (Phase 1+, NOT yet done)
 
-### P0 — core gap: reach the `/responses`-only models
-- **P0.1** Expose `supported_endpoints` + `capabilities` through `getModels()` typing and stop stripping it in
-  `routes/models/route.ts`. (Foundation for routing.)
-- **P0.2** `services/copilot/create-responses.ts` — native `POST /responses` egress via `copilotFetch`
-  (streaming + non-streaming). Body forwarded in Responses shape. Ref pattern: ericc-ch/copilot-api PR #219
-  (needs re-capture — `gh`/web blocked this session).
-- **P0.3** Endpoint router: given a (model) decide `/responses` vs `/chat/completions` from the catalog.
-- **P0.4** Codex `/v1/responses` handler: when target model is `/responses`-native → **passthrough** (no
-  translate-down); else keep the existing translate-to-chat path. Unlocks **Codex → gpt-5.3-codex / gpt-5.5**.
+### P0 — core gap: reach the `/responses`-only models  ✅ DONE (live-verified 2026-06-18)
+- **P0.1 ✅** Expose `supported_endpoints` + `capabilities.supports.reasoning_effort` through `getModels()`
+  typing (`services/copilot/get-models.ts`) and surface `supported_endpoints` in `routes/models/route.ts`.
+- **P0.2 ✅** `services/copilot/create-responses.ts` — native `POST /responses` egress through the existing
+  `copilotFetch` chokepoint (keeps 401-retry; diverges from PR #219's raw `fetch`). Streaming + non-streaming.
+- **P0.3 ✅** Endpoint router `lib/endpoint-router.ts` — `modelSupportsEndpoint(model, "/responses")` reads the
+  catalog from `state.models`.
+- **P0.4 ✅** Codex `/v1/responses` handler: passthrough (no translate) when the target model is
+  `/responses`-native; else the existing translate-down path (unchanged). Unlocks **Codex → gpt-5.3-codex /
+  gpt-5.5 / gpt-5.4**. Unit tests: `tests/endpoint-router.test.ts`, `tests/create-responses.test.ts`.
 
 ### P1 — Claude Code → codex/gpt-5.5 (the hard cross)
 - **P1.1** `Anthropic Messages → Responses` request translator (+ Responses→Anthropic response/stream).
@@ -129,11 +132,13 @@ Matrix to smoke-test end-to-end through the real backend:
 ---
 
 ## 4. Open items needing capture before P0.2/P1.1 (no-guess rule)
-- [ ] **Raw Codex `/responses` request wire shape** — local traces are 100% `anthropic` (Claude Code); zero
-      Codex captures exist. Capture by pointing Codex CLI at `:4142` with `--trace`, OR re-fetch PR #219.
-- [ ] **PR #219 exact native-forward code** — `gh` unauthenticated + WebFetch blocked this session; retry with
-      `gh auth login` or `GH_TOKEN`.
-- [ ] **What `ws:/responses` implies** — websocket variant; confirm the plain `POST /responses` is sufficient.
+- [x] **Raw Codex `/responses` request wire shape** — captured 2026-06-18 via the passthrough trace on :4142
+      (`responses-passthrough` `.req`/`.resp` pairs, incl. a streaming tool-call response). Note: these were
+      driven by `curl`, not the real Codex CLI — a genuine Codex-CLI capture is still ideal for P1.1 fidelity.
+- [x] **PR #219 exact native-forward code** — re-captured (`gh` now authenticated). We deliberately diverged:
+      route through `copilotFetch` (preserves 401-retry) instead of #219's raw `fetch`.
+- [ ] **What `ws:/responses` implies** — websocket variant; plain `POST /responses` proven sufficient for
+      non-streaming **and** SSE streaming this session. `ws:` not needed for current clients.
 
 ---
 

@@ -9,6 +9,9 @@ import { createChatCompletions } from "../src/services/copilot/create-chat-compl
 state.copilotToken = "test-token"
 state.vsCodeVersion = "1.0.0"
 state.accountType = "individual"
+// Future expiry so ensureCopilotToken() short-circuits instead of firing a
+// token-refresh fetch that would otherwise land in fetchMock.mock.calls[0].
+state.copilotTokenExpiresAt = Math.floor(Date.now() / 1000) + 3600
 
 // Helper to mock fetch
 const fetchMock = mock(

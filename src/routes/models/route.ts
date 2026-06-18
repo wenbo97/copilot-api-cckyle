@@ -21,6 +21,7 @@ modelRoutes.get("/", async (c) => {
       created_at: new Date(0).toISOString(), // No date available from source
       owned_by: model.vendor,
       display_name: model.name,
+      supported_endpoints: model.supported_endpoints,
     }))
 
     return c.json({
