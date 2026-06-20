@@ -128,6 +128,9 @@ P2 follow-up.
     Messages→Chat tool paths.
   - Close DESIGN.md §P2 stream items (empty `.done`, missing tool-call `output_item.done`) — each with a
     regression test.
+- **P1-F Headless acceptance harness (the "done" gate — see §7).** Build `tests/acceptance/` — a runner that
+  drives real `claude -p` and `codex exec` against a worktree-code proxy instance and asserts on trace-path
+  oracles + exit codes. This harness *is* the definition of done; no one declares "complete" by inspection.
 
 ### P2 — Refactor to hub-IR (opt-in, gated on all P1 green)
 
@@ -135,64 +138,155 @@ Introduce a minimal internal representation + a `transformRequest/transformRespo
 (protocol) inspired by litellm's `BaseResponsesAPIConfig`, collapsing the 6 ad-hoc translators into
 hub-and-spoke. **Only attempted if P1 lands clean and review approves.** Documented as a follow-up otherwise.
 
-## 6. Agent Team topology
+## 6. Agent Team (named, persistent — not fire-and-forget subagents)
 
-Phased pipeline: **fan out on reads, serialize on shared-file writes.** The hard constraint: P1-A & P1-D both
-touch `endpoint-router.ts`; P1-C & P1-E both touch the translation files. Naive "one agent per fix in
-parallel" collides.
+This runs as a **standing team of named teammates**, not one-shot parallel subagents. Each teammate is spawned
+once, addressed by name via SendMessage, kept alive across the phase, and coordinated through the shared
+TaskList. **I am the lead/integrator:** I own the shared-file seams, assign and unblock tasks, run the
+adversarial review, and am the only one permitted to mark a task complete (gated on §7 evidence). The team is
+sized so each member owns a **disjoint file set** — the org chart enforces the no-collision rule instead of
+hoping parallel writers don't clash.
 
-- **Phase 0 — Recon (parallel, read-only subagents).**
-  - *litellm pattern-extractor*: extract exact litellm logic for the three ⑤ ports (item-id, encrypted_content,
-    tool-name) as TS-ready pseudocode.
-  - *catalog ground-truth diagnostician*: already largely done in this session (field present, regex dead) —
-    formalize as a one-page evidence note the implementers consume.
-  - Independent inputs → genuine parallel.
-- **Phase 1 — Implement (two serial tracks, parallel to each other).**
-  - *Track Routing+Identity* (owns `endpoint-router.ts`, `model-mapping.ts`): P1-A → P1-B → P1-D, serial.
-  - *Track Translation* (owns translators + `_shared/`): P1-C (characterization tests first) → P1-E, serial.
-  - Independent new modules (tool-name truncation util) fan out freely.
-  - **Shared-file edits executed in the main thread** (most reliable for overlapping seams) rather than
-    worktree-merge reconciliation; subagents draft, main thread integrates.
-- **Phase 1.5 — Adversarial review.** A reviewer subagent refutes each fix: correctness, and specifically "did
-  any P1-C/P1-D de-dup change observable behavior?" Findings block acceptance until resolved.
-- **Phase 2 — Verify (gate).** Unit + `tsc` + lint first; then the live smoke matrix (§7).
+### Roster
 
-## 7. Verification
-
-### Deterministic (fast loop, must pass before live)
-- `bun test` (existing suite + new tests from P1-A…E green).
-- `bunx tsc --noEmit` clean.
-- `bun run lint` clean.
-
-### Live smoke matrix (final gate, user-chosen) — separate instance on **:4142**, small volume
-`:4141` powers the active CC session (read-only there). Run a second instance on `:4142` via the VS Code
-bridge, premium-quota-aware.
-
-| Client | Model | Assert |
+| Teammate | Owns (writable) | Responsible for |
 |---|---|---|
-| Codex | `gpt-5.3-codex` | native `/responses`, stream + tool call, no `unsupported_api_for_model` |
-| Codex | `gpt-5.5` | native `/responses` |
-| Codex | `gpt-5.4` | resolves to `/responses` (canary: dual-endpoint, same-protocol) |
-| Codex | `claude-opus-4.8` | translate-down still works |
-| CC | `claude-opus-4.8` | unchanged, all effort levels, thinking lossless |
-| CC | `gpt-5.5` | Messages→Responses bridge |
-| CC | `gpt-5.3-codex` | Messages→Responses bridge, effort clamped to `xhigh` (never `max`) |
-| CC | `gpt-5.4` | resolves to `/responses` (CC canary) |
-| OpenAI client | `gpt-5.4` | resolves to `/chat/completions` (same-protocol) |
-| OpenAI client | `gpt-5.5` | `/responses`-only → **clean 4xx** (out of scope to bridge), **not** raw backend 400 |
+| **@recon** | nothing (read-only) | Phase 0: extract exact litellm logic for the three ⑤ ports as TS-ready notes; formalize the catalog ground-truth evidence note. Disbands after handing notes to the leads. |
+| **@routing-eng** | `src/lib/endpoint-router.ts`, `src/lib/model-mapping.ts`, `src/lib/model-identity.ts` (new) | P1-A routing + P1-B identity + P1-D reasoning-policy module. Serial within this member. |
+| **@translation-eng** | `src/routes/_shared/**` (new), the 6 translator modules, `create-messages.ts`/`create-responses.ts` | P1-C shared primitives (characterization tests FIRST) + P1-E bug fixes & litellm ports. Serial within this member. |
+| **@accept-eng** | `tests/acceptance/**` (new) | P1-F: build the headless runner (trace-tag oracle, `claude -p` + `codex exec` drivers, RESULTS writer). Can build against the spec while engineers code — depends only on trace tags + CLI flags, both already pinned. |
+| **@reviewer** | nothing (read-only) | Phase 1.5: adversarially refute each landed fix; specifically hunt behavior drift from P1-C/P1-D de-dup. Findings file as tasks that block completion. |
+
+Disjoint ownership means **@routing-eng and @translation-eng run truly in parallel** (no shared file), and
+**@accept-eng runs alongside them** (new dir). The only cross-member seam is each handler file
+(`messages/handler.ts`, `responses/handler.ts`, `chat-completions/handler.ts`) — those call *both* the routing
+and translation modules, so **I (lead) make the handler wiring edits** once both engineers' modules land, not
+either engineer unilaterally.
+
+### Phase flow (coordination, not just parallelism)
+
+- **Phase 0 — Recon.** `@recon` produces the litellm-port notes + evidence note. Gates Phase 1 (engineers
+  consume the notes). `@accept-eng` may start the runner skeleton now (CLI/oracle are known).
+- **Phase 1 — Implement.** `@routing-eng` ∥ `@translation-eng` ∥ `@accept-eng`, each on its own files, each
+  doing TDD (tests before/with code). Progress + blockers flow through TaskList; I unblock and answer design
+  questions via SendMessage. As each module stabilizes, **I wire the handlers** to it.
+- **Phase 1.5 — Adversarial review.** `@reviewer` refutes; drift/bugs become blocking tasks routed back to the
+  owning engineer. Loop until clean.
+- **Phase 2 — Verify (gate).** Deterministic pre-gate (unit/tsc/lint), then `@accept-eng` runs the **headless
+  acceptance suite (§7)** on `:4143`. I declare completion ONLY from a green `RESULTS-<date>.md`.
+- **Phase 2 — Verify (gate).** Unit + `tsc` + lint first; then the **headless acceptance suite (§7)** — the
+  only thing permitted to declare "complete." Driven by real `claude -p` / `codex exec`, judged by trace-tag
+  oracles.
+
+## 7. Verification — headless acceptance suite (the ONLY thing that may declare "complete")
+
+> **Hard rule (user-mandated).** "Complete" may NEVER be asserted by inspection, reasoning, or "it should
+> work." It is earned ONLY by the acceptance suite below passing end-to-end. Each row runs a **real client in
+> headless mode** (`claude -p` / `codex exec`) against a proxy serving **worktree (fixed) code**, and is judged
+> by a **machine oracle**, not by eyeballing the answer. Any red cell ⇒ not complete.
+
+### 7.0 Test rig
+
+- **Proxy under test:** a fresh instance on **:4143** started from the worktree (`D:\Tools\copilot-api-feat`),
+  so it serves the *fixed* code — `:4141` (live CC session) and `:4142` (existing test instance, *old* code)
+  are left untouched. Started with `--trace` so every request writes a trace file.
+- **The oracle = trace path tag.** The proxy tags each trace with the egress it took
+  (`anthropic-passthrough`, `anthropic-via-responses`, `responses-passthrough`, `responses` [=translate-down],
+  `chat`). The runner asserts the **tag**, not just that text returned — this is what proves *routing*
+  correctness rather than merely "a reply arrived." Plus: process **exit code 0**, non-empty final message, and
+  **no** `unsupported_api_for_model` / raw 400 in output.
+- **Clients & how they're pointed at the proxy:**
+  - **Claude Code:** `ANTHROPIC_BASE_URL=http://localhost:4143 ANTHROPIC_AUTH_TOKEN=dummy claude -p "<prompt>"
+    --model <id> --output-format stream-json` (+ `--agents` / `--mcp-config` for the agent-team rows).
+  - **Codex:** `codex exec -m <id> -c model_providers.copilot.base_url=http://localhost:4143/v1
+    -c model_providers.copilot.wire_api=responses -c model_provider=copilot --json --skip-git-repo-check
+    -o <lastmsg-file> "<prompt>"` (a throwaway `--profile`/config for the proxy provider; auth token dummy).
+- **Quota:** small volume, one assertion per cell, premium-aware. Prompts are trivial ("reply OK", "what is
+  13×17") to minimize tokens; tool-call rows use a single cheap tool.
+
+### 7.1 Deterministic pre-gate (must pass before any live row)
+- `bun test` (unit suite + new P1-A…E tests) green · `bunx tsc --noEmit` clean · `bun run lint` clean.
+
+### 7.2 Mandate 1 — single-shot model mapping (Claude series + GPT-5.5 + GPT-5.3-codex)
+One headless sentence per model; assert it resolves + routes correctly. Covers the identity resolver (Rule A)
+and per-handler routing (Rule B) on the simplest path.
+
+| # | Client | Model id sent | Expected trace tag | Also assert |
+|---|---|---|---|---|
+| 1a | `claude -p` | `claude-opus-4.8` | `anthropic-passthrough` | exit 0, non-empty |
+| 1b | `claude -p` | `claude-opus-4-8[1m]` (suffix) | `anthropic-passthrough`, resolved→`claude-opus-4.8` | suffix-strip works |
+| 1c | `claude -p` | `claude-sonnet-4.6` | `anthropic-passthrough` | |
+| 1d | `claude -p` | `gpt-5.5` | `anthropic-via-responses` | Messages→Responses bridge |
+| 1e | `claude -p` | `gpt-5.3-codex` | `anthropic-via-responses` | effort clamped ≤`xhigh` in trace |
+| 1f | `codex exec` | `gpt-5.5` | `responses-passthrough` | native, no `unsupported_api_for_model` |
+| 1g | `codex exec` | `gpt-5.3-codex` | `responses-passthrough` | |
+| 1h | `codex exec` | `claude-opus-4.8` | `responses`→translate-down to chat | translate path intact |
+
+### 7.3 Mandate 2 — subagents fully effective (short + long session)
+Claude Code subagents must work on **every** target model.
+- **2a Short:** `claude -p "Use the Explore subagent to find <X>; report back" --model gpt-5.5` (and a repeat
+  with `claude-opus-4.8`, `gpt-5.3-codex`). Oracle: a subagent trace appears (a distinct
+  `X-Initiator: agent`-tagged request in traces) **and** parent exit 0 with a synthesized answer.
+- **2b Long/multi-turn:** a scripted `--output-format stream-json` session that spawns a subagent, then asks a
+  follow-up that depends on the subagent's result (≥3 turns). Oracle: multiple agent-tagged traces across
+  turns, final answer references the subagent finding, no mid-stream error frame. Run on `claude-opus-4.8`
+  (passthrough) **and** `gpt-5.5` (bridge) — the bridge path is the risky one (item-id/encrypted_content ports).
+
+### 7.4 Mandate 3 — CC Agent Team + workflow modes, full series
+The orchestration features must work however invoked, on Claude **and** GPT models.
+- **3a `--agents` multi-agent:** define 2 custom agents via `--agents '{...}'`, prompt a task that fans out to
+  both. Run with `--model claude-opus-4.8`, `--model gpt-5.5`, `--model gpt-5.3-codex`. Oracle: ≥2 distinct
+  agent-tagged trace clusters, exit 0, combined answer.
+- **3b Workflow / tool-heavy:** a `--mcp-config` run exercising MCP tool calls through the proxy (tool_use ⇄
+  tool_result round-trip), on the same three models. Oracle: trace shows tool_use blocks *and* matching
+  tool_result continuation (this is exactly what the `isFunctionCallOutput` fix + tool-name truncation guard);
+  exit 0.
+- Each model × {3a, 3b} is a cell; all must be green.
+
+### 7.5 Mandate 4 — Codex task/agent modes (exec + review)
+Codex's non-interactive surfaces, which we enumerated from `codex --help`: **`exec`** (agent) and
+**`exec review` / `review`** (review). Both must work through the proxy on the GPT models (and Claude via
+translate-down).
+
+| # | Codex mode | Model | Oracle |
+|---|---|---|---|
+| 4a | `codex exec "<task>"` | `gpt-5.3-codex` | `responses-passthrough`, exit 0, `-o` last-message non-empty, a tool/command step occurred |
+| 4b | `codex exec "<task>"` | `gpt-5.5` | `responses-passthrough`, exit 0 |
+| 4c | `codex exec "<task>"` | `gpt-5.4` | `responses-passthrough` (dual-endpoint canary → same-protocol) |
+| 4d | `codex exec review` (or `codex review`) | `gpt-5.3-codex` | review runs headless, `responses-passthrough`, exit 0, non-empty review |
+| 4e | `codex exec "<task>"` | `claude-opus-4.8` | translate-down path, exit 0 (Codex→Claude still works) |
+
+> Codex modes beyond exec/review (e.g. `cloud`, `mcp-server`) are out of scope — they don't exercise the
+> proxy's chat/responses egress. If a `codex exec` row needs a tool step to be meaningful, a trivial repo task
+> ("create a file `ok.txt` containing OK") is used under `--sandbox workspace-write`.
+
+### 7.6 Result recording
+The runner writes `tests/acceptance/RESULTS-<date>.md`: one row per cell with PASS/FAIL, the asserted vs actual
+trace tag, exit code, and the trace file path as evidence. **Completion is declared only when every cell in
+7.1–7.5 is PASS in that file** — the report is the artifact, not a verbal claim.
 
 ## 8. Risks & mitigations
 
 - **De-dup changes behavior (③/④).** → Characterization tests captured before refactor; Phase 1.5 explicitly
-  hunts behavior drift.
+  hunts behavior drift; §7.2–7.5 re-prove behavior end-to-end through the real clients.
 - **`encrypted_content`/item-id ports are subtle.** → Port with litellm's docstring rationale verbatim as
-  comments; cover with the live multi-turn `/responses` smoke (Codex gpt-5.3-codex tool-call turn).
-- **Live quota burn.** → Small volume, one assertion per cell, `:4142` only.
+  comments; cover with the multi-turn rows (§7.3 long session on `gpt-5.5`, §7.5 Codex tool-call turns).
+- **Trace-tag oracle depends on `--trace` being on and tags being stable.** → P1 must keep the existing trace
+  `type` tags (they're load-bearing for acceptance); a tag rename requires updating the runner in lockstep.
+- **Codex→proxy provider wiring is non-trivial** (`model_providers.*` + `wire_api=responses` + auth). → The
+  harness pins an explicit throwaway config via `-c` overrides (§7.0) so it's reproducible and doesn't mutate
+  `~/.codex/config.toml`; a `codex doctor` smoke precedes the matrix.
+- **Live quota burn.** → Trivial prompts, one assertion per cell, dedicated `:4143` instance only.
+- **Port contention.** → Acceptance uses **:4143** (fixed-code), distinct from `:4141` (live session) and
+  `:4142` (old-code test instance), so nothing collides and the live session is never touched.
 - **Shared-file collisions in the team.** → Main-thread integration of overlapping seams; tracks own disjoint
   files.
 
 ## 9. Definition of done
 
-All P1 items implemented; deterministic gate green; live smoke matrix green (or any red cell explained and
-accepted by the user). P2 either landed-green or documented as a follow-up. Branch ready for the user's chosen
-integration (merge/PR — decided separately).
+**Binding definition (user-mandated):** the work is "complete" if and only if
+`tests/acceptance/RESULTS-<date>.md` shows **PASS for every cell in §7.1–§7.5** — produced by real headless
+`claude -p` / `codex exec` runs against the `:4143` fixed-code proxy, judged by trace-tag oracles. No verbal,
+inspected, or inferred completion claim is permitted. A red or skipped cell ⇒ not done; either fix it or get
+explicit user sign-off to accept it. P2 (hub-IR) is separately either landed-green under the same suite or
+documented as a follow-up. Branch integration (merge/PR) is decided separately after the suite is green.
