@@ -5,7 +5,7 @@ import type {
   AnthropicResponse,
 } from "~/routes/messages/anthropic-types"
 
-import { clampReasoningEffort } from "~/lib/endpoint-router"
+import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
 import { mapThinkingToReasoningEffort } from "~/routes/messages/non-stream-translation"
 
 import { copilotFetch } from "./copilot-fetch"

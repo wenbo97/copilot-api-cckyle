@@ -99,4 +99,56 @@ describe("clampReasoningEffort (preserved behavior)", () => {
     } as unknown as ModelsResponse
     expect(clampReasoningEffort("claude-opus-4.8", "max")).toBe("max")
   })
+  test("a mid-range allowed level passes through unchanged", () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.3-codex",
+          capabilities: {
+            supports: { reasoning_effort: ["low", "medium", "high", "xhigh"] },
+          },
+        },
+        {
+          id: "gpt-5.5",
+          capabilities: {
+            supports: {
+              reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
+            },
+          },
+        },
+      ],
+    } as unknown as ModelsResponse
+    expect(clampReasoningEffort("gpt-5.3-codex", "high")).toBe("high")
+    expect(clampReasoningEffort("gpt-5.5", "xhigh")).toBe("xhigh")
+  })
+  test("passes effort through when the model advertises no effort set", () => {
+    state.models = {
+      object: "list",
+      data: [{ id: "gpt-5.4" }],
+    } as unknown as ModelsResponse
+    // No reasoning_effort in the catalog entry -> nothing to clamp against.
+    expect(clampReasoningEffort("gpt-5.4", "max")).toBe("max")
+  })
+  test("passes effort through for an unknown model", () => {
+    state.models = {
+      object: "list",
+      data: [{ id: "gpt-5.4" }],
+    } as unknown as ModelsResponse
+    expect(clampReasoningEffort("does-not-exist", "max")).toBe("max")
+  })
+  test("leaves an unrecognized effort string as-is", () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.3-codex",
+          capabilities: {
+            supports: { reasoning_effort: ["low", "medium", "high", "xhigh"] },
+          },
+        },
+      ],
+    } as unknown as ModelsResponse
+    expect(clampReasoningEffort("gpt-5.3-codex", "ludicrous")).toBe("ludicrous")
+  })
 })

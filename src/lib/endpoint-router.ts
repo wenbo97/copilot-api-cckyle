@@ -2,11 +2,6 @@ import consola from "consola"
 
 import { state } from "./state"
 
-// clampReasoningEffort's implementation now lives in the reasoning-policy module.
-// Re-exported here as a behavior-preserving bridge so existing importers keep
-// working; this re-export is removed in R5 when callers repoint directly.
-export { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
-
 /**
  * Whether a model accepts a given Copilot egress endpoint, per the live catalog.
  *

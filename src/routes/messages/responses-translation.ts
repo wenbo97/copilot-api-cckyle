@@ -1,4 +1,4 @@
-import { clampReasoningEffort } from "~/lib/endpoint-router"
+import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
 
 import type {
   ResponseInputContentPart,
