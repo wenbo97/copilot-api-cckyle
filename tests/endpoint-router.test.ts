@@ -5,6 +5,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import {
   clampReasoningEffort,
   modelSupportsEndpoint,
+  pickEgress,
 } from "../src/lib/endpoint-router"
 import { state } from "../src/lib/state"
 
@@ -82,25 +83,26 @@ describe("modelSupportsEndpoint", () => {
     expect(modelSupportsEndpoint("does-not-exist", "/responses")).toBe(false)
   })
 
-  test("returns false when a non-responses-only model omits the field", () => {
+  test("returns false when a model omits the supported_endpoints field", () => {
     state.models = fixtureModels
-    // `no-endpoints` is not a gpt-5/codex id, so the inference does not apply.
+    // `no-endpoints` advertises no endpoint set, so the pure-catalog read reports
+    // false (modelSupportsEndpoint never guesses from the id).
     expect(modelSupportsEndpoint("no-endpoints", "/responses")).toBe(false)
   })
 
-  test("infers /responses for a gpt-5 model when the catalog omits the field", () => {
+  test("returns false when a gpt-5 model omits the field (no regex inference)", () => {
     state.models = fixtureModels
-    // Enterprise catalogs return no supported_endpoints array at all; the router
-    // must still route gpt-5.x to /responses or the bridge 400s on /chat/completions.
-    expect(modelSupportsEndpoint("gpt-5.7", "/responses")).toBe(true)
-    // The inference is scoped to /responses only — never invents other endpoints.
+    // The catalog is the single source of truth: a model that advertises no
+    // supported_endpoints is treated as supporting none here. (pickEgress applies
+    // a same-protocol fallback for these; modelSupportsEndpoint does not guess.)
+    expect(modelSupportsEndpoint("gpt-5.7", "/responses")).toBe(false)
     expect(modelSupportsEndpoint("gpt-5.7", "/chat/completions")).toBe(false)
   })
 
-  test("infers /responses for a responses-only model when the catalog has not loaded yet", () => {
+  test("returns false for any model when the catalog has not loaded yet", () => {
     state.models = undefined
-    // Before the catalog loads we still route known responses-only ids correctly.
-    expect(modelSupportsEndpoint("gpt-5.3-codex", "/responses")).toBe(true)
+    // No catalog -> no advertised endpoints -> false (no id-pattern inference).
+    expect(modelSupportsEndpoint("gpt-5.3-codex", "/responses")).toBe(false)
   })
 
   test("returns false for an unknown model when the catalog has not loaded yet", () => {
@@ -151,5 +153,45 @@ describe("clampReasoningEffort", () => {
   test("leaves an unrecognized effort string as-is", () => {
     state.models = fixtureModels
     expect(clampReasoningEffort("gpt-5.3-codex", "ludicrous")).toBe("ludicrous")
+  })
+})
+
+describe("pickEgress (per-handler, catalog-truth)", () => {
+  afterEach(() => {
+    state.models = undefined
+  })
+
+  test("Codex+gpt-5.4 → /responses (same-protocol)", () => {
+    state.models = fixtureModels
+    expect(pickEgress("responses", "gpt-5.4")).toBe("/responses")
+  })
+  test("CC+gpt-5.4 → /responses (no messages; nearest cross)", () => {
+    state.models = fixtureModels
+    expect(pickEgress("messages", "gpt-5.4")).toBe("/responses")
+  })
+  test("OpenAI+gpt-5.4 → /chat/completions (same-protocol)", () => {
+    state.models = fixtureModels
+    expect(pickEgress("chat", "gpt-5.4")).toBe("/chat/completions")
+  })
+  test("OpenAI+gpt-5.5 (responses-only) → unsupported", () => {
+    state.models = fixtureModels
+    expect(pickEgress("chat", "gpt-5.5")).toBe("unsupported")
+  })
+  test("CC+claude-opus-4.8 → /v1/messages (passthrough)", () => {
+    state.models = fixtureModels
+    expect(pickEgress("messages", "claude-opus-4.8")).toBe("/v1/messages")
+  })
+  test("Codex+claude-opus-4.8 → /chat/completions (translate-down)", () => {
+    state.models = fixtureModels
+    expect(pickEgress("responses", "claude-opus-4.8")).toBe("/chat/completions")
+  })
+  test("model with NO supported_endpoints → same-protocol fallback (logged)", () => {
+    state.models = {
+      object: "list",
+      data: [{ id: "mystery-model" }],
+    } as unknown as ModelsResponse
+    expect(pickEgress("messages", "mystery-model")).toBe("/v1/messages")
+    expect(pickEgress("responses", "mystery-model")).toBe("/responses")
+    expect(pickEgress("chat", "mystery-model")).toBe("/chat/completions")
   })
 })
