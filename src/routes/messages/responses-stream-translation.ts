@@ -1,11 +1,10 @@
+import { deriveAnthropicStopReason } from "~/routes/_shared/stop-reason"
+
 import type {
   ResponseObject,
   ResponseStreamEvent,
 } from "../responses/responses-types"
-import type {
-  AnthropicStreamEventData,
-  AnthropicResponse,
-} from "./anthropic-types"
+import type { AnthropicStreamEventData } from "./anthropic-types"
 
 // =============================================================================
 // OpenAI Responses stream  ->  Anthropic Messages stream
@@ -191,7 +190,10 @@ function emitFinish(
     {
       type: "message_delta",
       delta: {
-        stop_reason: deriveStopReason(response, state),
+        stop_reason: deriveAnthropicStopReason(
+          state.sawToolCall,
+          response.status,
+        ),
         stop_sequence: null,
       },
       usage: {
@@ -246,13 +248,4 @@ function openTextBlock(
     })
   }
   return info
-}
-
-function deriveStopReason(
-  response: ResponseObject,
-  state: ResponsesToAnthropicStreamState,
-): AnthropicResponse["stop_reason"] {
-  if (state.sawToolCall) return "tool_use"
-  if (response.status === "incomplete") return "max_tokens"
-  return "end_turn"
 }
