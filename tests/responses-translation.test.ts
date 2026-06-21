@@ -6,9 +6,14 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { state } from "../src/lib/state"
 import {
+  createResponsesToAnthropicState,
+  translateResponsesEventToAnthropicEvents,
+} from "../src/routes/messages/responses-stream-translation"
+import {
   translateAnthropicToResponses,
   translateResponsesToAnthropic,
 } from "../src/routes/messages/responses-translation"
+import { translateToOpenAI } from "../src/routes/responses/non-stream-translation"
 
 // Catalog so clampReasoningEffort has effort sets to clamp against.
 const fixtureModels = {
@@ -274,5 +279,345 @@ describe("translateResponsesToAnthropic (response)", () => {
     expect(translateResponsesToAnthropic(resp, "gpt-5.5").stop_reason).toBe(
       "max_tokens",
     )
+  })
+})
+
+// =============================================================================
+// CHARACTERIZATION TESTS (T1) — lock CURRENT behavior before the de-dup (T3).
+//
+// These pin the exact output of translateTools / translateToolChoice (both the
+// Anthropic->Responses copy and the Responses->Chat copy) and deriveStopReason
+// (both the non-stream and the stream copy). They MUST keep passing verbatim
+// through the de-dup so we can prove it is behavior-preserving. Do NOT relax
+// them when wiring the shared primitives.
+// =============================================================================
+
+const charToolsOf = (tools: AnthropicMessagesPayload["tools"]) =>
+  translateAnthropicToResponses({
+    model: "gpt-5.5",
+    max_tokens: 10,
+    messages: [{ role: "user", content: "hi" }],
+    tools,
+  }).tools
+
+const charChoiceOf = (tc: AnthropicMessagesPayload["tool_choice"]) =>
+  translateAnthropicToResponses({
+    model: "gpt-5.5",
+    max_tokens: 10,
+    messages: [{ role: "user", content: "hi" }],
+    tool_choice: tc,
+  }).tool_choice
+
+const charRespCompleted = (
+  status: ResponseObject["status"],
+): ResponseObject => ({
+  id: "resp_1",
+  object: "response",
+  created_at: 0,
+  model: "gpt-5.5",
+  status,
+  output: [],
+  usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+  error: null,
+})
+
+const charStopReasonFromStream = (
+  events: ReturnType<typeof translateResponsesEventToAnthropicEvents>,
+) => {
+  const delta = events.find((e) => e.type === "message_delta") as
+    | { type: "message_delta"; delta: { stop_reason?: string } }
+    | undefined
+  return delta?.delta.stop_reason
+}
+
+describe("CHARACTERIZATION: translateTools (Anthropic -> Responses)", () => {
+  afterEach(() => {
+    state.models = undefined
+  })
+
+  const toolsOf = charToolsOf
+
+  test("name/description/input_schema -> function/name/description/parameters", () => {
+    expect(
+      toolsOf([
+        {
+          name: "get_weather",
+          description: "d",
+          input_schema: { type: "object" },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "function",
+        name: "get_weather",
+        description: "d",
+        parameters: { type: "object" },
+      },
+    ])
+  })
+
+  test("undefined tools -> undefined", () => {
+    expect(toolsOf(undefined)).toBeUndefined()
+  })
+
+  test("empty tools array -> undefined", () => {
+    expect(toolsOf([])).toBeUndefined()
+  })
+
+  test("missing description is carried through as undefined", () => {
+    expect(toolsOf([{ name: "t", input_schema: { type: "object" } }])).toEqual([
+      {
+        type: "function",
+        name: "t",
+        description: undefined,
+        parameters: { type: "object" },
+      },
+    ])
+  })
+})
+
+describe("CHARACTERIZATION: translateToolChoice (Anthropic -> Responses)", () => {
+  afterEach(() => {
+    state.models = undefined
+  })
+
+  const choiceOf = charChoiceOf
+
+  test("undefined -> undefined", () => {
+    expect(choiceOf(undefined)).toBeUndefined()
+  })
+  test("auto -> auto", () => {
+    expect(choiceOf({ type: "auto" })).toBe("auto")
+  })
+  test("any -> required", () => {
+    expect(choiceOf({ type: "any" })).toBe("required")
+  })
+  test("none -> none", () => {
+    expect(choiceOf({ type: "none" })).toBe("none")
+  })
+  test("tool with name -> { type: function, name }", () => {
+    expect(choiceOf({ type: "tool", name: "x" })).toEqual({
+      type: "function",
+      name: "x",
+    })
+  })
+  test("tool without name -> auto (fallback)", () => {
+    expect(choiceOf({ type: "tool" })).toBe("auto")
+  })
+})
+
+describe("CHARACTERIZATION: deriveStopReason (non-stream, via translateResponsesToAnthropic)", () => {
+  const base = {
+    id: "resp_1",
+    object: "response" as const,
+    created_at: 0,
+    model: "gpt-5.5",
+    usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    error: null,
+  }
+  const stopReasonFor = (
+    status: ResponseObject["status"],
+    output: ResponseObject["output"],
+  ) =>
+    translateResponsesToAnthropic({ ...base, status, output }, "gpt-5.5")
+      .stop_reason
+
+  test("plain completed text -> end_turn", () => {
+    expect(
+      stopReasonFor("completed", [
+        {
+          type: "message",
+          id: "m",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "hi", annotations: [] }],
+        },
+      ]),
+    ).toBe("end_turn")
+  })
+  test("has function_call -> tool_use (wins over status)", () => {
+    expect(
+      stopReasonFor("incomplete", [
+        {
+          type: "function_call",
+          id: "fc",
+          call_id: "c",
+          name: "f",
+          arguments: "{}",
+          status: "completed",
+        },
+      ]),
+    ).toBe("tool_use")
+  })
+  test("incomplete, no tool -> max_tokens", () => {
+    expect(
+      stopReasonFor("incomplete", [
+        {
+          type: "message",
+          id: "m",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "x", annotations: [] }],
+        },
+      ]),
+    ).toBe("max_tokens")
+  })
+})
+
+describe("CHARACTERIZATION: deriveStopReason (stream, via Responses->Anthropic events)", () => {
+  const respCompleted = charRespCompleted
+  const stopReasonFromStream = charStopReasonFromStream
+
+  test("no tool call, completed -> end_turn", () => {
+    const st = createResponsesToAnthropicState("gpt-5.5")
+    const events = translateResponsesEventToAnthropicEvents(
+      { type: "response.completed", response: respCompleted("completed") },
+      st,
+    )
+    expect(stopReasonFromStream(events)).toBe("end_turn")
+  })
+
+  test("no tool call, incomplete -> max_tokens", () => {
+    const st = createResponsesToAnthropicState("gpt-5.5")
+    const events = translateResponsesEventToAnthropicEvents(
+      { type: "response.completed", response: respCompleted("incomplete") },
+      st,
+    )
+    expect(stopReasonFromStream(events)).toBe("max_tokens")
+  })
+
+  test("function_call seen earlier -> tool_use (wins over status)", () => {
+    const st = createResponsesToAnthropicState("gpt-5.5")
+    translateResponsesEventToAnthropicEvents(
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc",
+          call_id: "c",
+          name: "f",
+          arguments: "",
+          status: "completed",
+        },
+      },
+      st,
+    )
+    const events = translateResponsesEventToAnthropicEvents(
+      { type: "response.completed", response: respCompleted("incomplete") },
+      st,
+    )
+    expect(stopReasonFromStream(events)).toBe("tool_use")
+  })
+})
+
+describe("CHARACTERIZATION: translateToOpenAI tools/tool_choice (Responses -> Chat)", () => {
+  test("Responses-shape tool (name/parameters) -> Chat function tool", () => {
+    const out = translateToOpenAI({
+      model: "claude-opus-4.8",
+      input: "hi",
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          description: "d",
+          parameters: { type: "object" },
+        },
+      ],
+    })
+    expect(out.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "d",
+          parameters: { type: "object" },
+        },
+      },
+    ])
+  })
+
+  test("already-Chat-shape tool ({ function: { name } }) passes through as-is", () => {
+    const passthrough = {
+      type: "function",
+      function: { name: "f", parameters: { type: "object" } },
+    }
+    const out = translateToOpenAI({
+      model: "claude-opus-4.8",
+      input: "hi",
+      tools: [passthrough as never],
+    })
+    expect(out.tools).toEqual([passthrough as never])
+  })
+
+  test("undefined tools -> undefined; empty list -> undefined", () => {
+    expect(
+      translateToOpenAI({ model: "claude-opus-4.8", input: "hi" }).tools,
+    ).toBeUndefined()
+    expect(
+      translateToOpenAI({ model: "claude-opus-4.8", input: "hi", tools: [] })
+        .tools,
+    ).toBeUndefined()
+  })
+
+  test("tool_choice: string required passes; object -> { type: function, function: { name } }", () => {
+    expect(
+      translateToOpenAI({
+        model: "claude-opus-4.8",
+        input: "hi",
+        tool_choice: "required",
+      }).tool_choice,
+    ).toBe("required")
+    expect(
+      translateToOpenAI({
+        model: "claude-opus-4.8",
+        input: "hi",
+        tool_choice: { type: "function", name: "x" },
+      }).tool_choice,
+    ).toEqual({ type: "function", function: { name: "x" } })
+  })
+})
+
+describe("CHARACTERIZATION: translateToOpenAI message routing (stable parts, pre-T4)", () => {
+  test("instructions -> leading system message; string input -> user message", () => {
+    const out = translateToOpenAI({
+      model: "claude-opus-4.8",
+      input: "hello",
+      instructions: "be terse",
+    })
+    expect(out.messages[0]).toEqual({ role: "system", content: "be terse" })
+    expect(out.messages[1]).toEqual({ role: "user", content: "hello" })
+  })
+
+  test("function_call_output -> role:tool message (unchanged by T4)", () => {
+    const out = translateToOpenAI({
+      model: "claude-opus-4.8",
+      input: [
+        { type: "function_call_output", call_id: "c1", output: "ok" } as never,
+      ],
+    })
+    expect(out.messages).toEqual([
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+    ])
+  })
+
+  test("developer role -> system; user/assistant text preserved", () => {
+    const out = translateToOpenAI({
+      model: "claude-opus-4.8",
+      input: [
+        { role: "developer", content: "dev note" },
+        { role: "user", content: [{ type: "input_text", text: "q" }] },
+        { role: "assistant", content: [{ type: "output_text", text: "a" }] },
+      ],
+    })
+    expect(out.messages[0]).toEqual({ role: "system", content: "dev note" })
+    expect(out.messages[1]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "q" }],
+    })
+    expect(out.messages[2]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "a" }],
+    })
   })
 })
