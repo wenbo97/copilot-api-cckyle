@@ -66,3 +66,36 @@ function hasAgentMessages(payload: ResponsesPayload): boolean {
     )
   })
 }
+
+// A reasoning item as it arrives on the wire (loose: fields are optional and may
+// be null). Only the shape we read/forward is named.
+export interface ReasoningItem {
+  type: "reasoning"
+  id?: string
+  status?: string | null
+  encrypted_content?: string | null
+  [key: string]: unknown
+}
+
+/**
+ * Normalize a `reasoning` item for multi-turn replay to the Copilot /responses
+ * backend (port of litellm `_handle_reasoning_item`).
+ *
+ * Copilot reasoning items carry `encrypted_content`, the opaque blob that lets
+ * the backend verify and continue an earlier chain of thought. The naive path
+ * drops it (→ "encrypted content could not be verified" on the next turn). We
+ * keep `encrypted_content` when present, drop `status` when it is null (OpenAI
+ * rejects a null status), and keep every other non-null field as-is.
+ */
+export function sanitizeReasoningItem(
+  item: ReasoningItem,
+): Record<string, unknown> {
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(item)) {
+    // Drop null fields outright (e.g. status: null, summary: null). The backend
+    // 400s on a null status, and a null elsewhere carries no information.
+    if (value === null) continue
+    cleaned[key] = value
+  }
+  return cleaned
+}

@@ -1,9 +1,12 @@
-import { test, expect, mock, beforeEach } from "bun:test"
+import { test, expect, mock, beforeEach, describe } from "bun:test"
 
 import type { ResponsesPayload } from "../src/routes/responses/responses-types"
 
 import { state } from "../src/lib/state"
-import { createResponses } from "../src/services/copilot/create-responses"
+import {
+  createResponses,
+  sanitizeReasoningItem,
+} from "../src/services/copilot/create-responses"
 
 // Mock state so copilotFetch's ensureCopilotToken() short-circuits (valid,
 // non-expiring token) and we never hit the real token-refresh path.
@@ -90,4 +93,51 @@ test("sets X-Initiator to agent when a function_call_output is present", async (
   await createResponses(payload)
   const [, opts] = callArgs()
   expect(opts.headers["X-Initiator"]).toBe("agent")
+})
+
+describe("sanitizeReasoningItem (litellm port)", () => {
+  test("preserves encrypted_content; drops status:null", () => {
+    const cleaned = sanitizeReasoningItem({
+      type: "reasoning",
+      id: "r",
+      status: null,
+      encrypted_content: "BLOB",
+      content: [],
+    })
+    expect(cleaned.encrypted_content).toBe("BLOB")
+    expect("status" in cleaned).toBe(false)
+  })
+
+  test("keeps a non-null status", () => {
+    const cleaned = sanitizeReasoningItem({
+      type: "reasoning",
+      id: "r",
+      status: "completed",
+      encrypted_content: "BLOB",
+    })
+    expect(cleaned.status).toBe("completed")
+  })
+
+  test("drops other null fields but keeps non-null ones", () => {
+    const cleaned = sanitizeReasoningItem({
+      type: "reasoning",
+      id: "r",
+      encrypted_content: "BLOB",
+      summary: null,
+      content: [{ type: "reasoning_text", text: "x" }],
+    })
+    expect("summary" in cleaned).toBe(false)
+    expect(cleaned.content).toEqual([{ type: "reasoning_text", text: "x" }])
+    expect(cleaned.type).toBe("reasoning")
+    expect(cleaned.id).toBe("r")
+  })
+
+  test("omits encrypted_content when it is absent (does not invent a key)", () => {
+    const cleaned = sanitizeReasoningItem({
+      type: "reasoning",
+      id: "r",
+      status: "completed",
+    })
+    expect("encrypted_content" in cleaned).toBe(false)
+  })
 })
