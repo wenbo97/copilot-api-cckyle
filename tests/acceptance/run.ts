@@ -24,82 +24,27 @@ import path from "node:path"
 import { runClaude } from "./lib/claude"
 import { runCodex } from "./lib/codex"
 import { codexDoctor } from "./lib/codex"
-import { tracesSince, type TraceInfo } from "./lib/oracle"
-import { startProxy, type ProxyHandle } from "./lib/proxy"
 import {
-  MANDATE_TITLES,
-  MATRICES,
-  type ExtraAssertContext,
-  type MatrixCell,
-} from "./matrices"
+  judgeCell,
+  parseArgs,
+  renderResults,
+  selectCells,
+  type CellResult,
+  type DrivenOutcome,
+} from "./lib/judge"
+import { tracesSince } from "./lib/oracle"
+import { startProxy, type ProxyHandle } from "./lib/proxy"
+import { MATRICES, type MatrixCell } from "./matrices"
 
 const RESULTS_DIR = import.meta.dir
 // Settle time for the trace `.req` to hit disk after the client returns.
 const TRACE_SETTLE_MS = 1_500
 
-interface CellResult {
-  cell: MatrixCell
-  pass: boolean
-  expectedTag: string
-  actualTag: string | undefined
-  exitCode: number | null
-  timedOut: boolean
-  finalTextLen: number
-  failures: Array<string>
-  tracePath: string | undefined
-  traceCount: number
-  durationMs: number
-}
-
-interface CliOptions {
-  only?: Set<string>
-  mandate?: string
-  list: boolean
-}
-
-function parseArgs(argv: Array<string>): CliOptions {
-  const opts: CliOptions = { list: false }
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    switch (a) {
-      case "--only": {
-        opts.only = new Set((argv[++i] ?? "").split(",").map((s) => s.trim()))
-
-        break
-      }
-      case "--mandate": {
-        opts.mandate = argv[++i]
-
-        break
-      }
-      case "--list": {
-        opts.list = true
-
-        break
-      }
-      // No default
-    }
-  }
-  return opts
-}
-
-function selectCells(opts: CliOptions): Array<MatrixCell> {
-  let cells = MATRICES
-  if (opts.mandate) cells = cells.filter((c) => c.mandate === opts.mandate)
-  if (opts.only) cells = cells.filter((c) => opts.only?.has(c.id))
-  return cells
-}
-
 /** Drive one cell's client and return the captured outcome (no judging yet). */
 async function driveCell(
   cell: MatrixCell,
   proxy: ProxyHandle,
-): Promise<{
-  exitCode: number | null
-  timedOut: boolean
-  finalText: string
-  output: string
-}> {
+): Promise<DrivenOutcome> {
   if (cell.client === "claude") {
     const res = await runClaude({
       prompt: cell.prompt,
@@ -128,62 +73,6 @@ async function driveCell(
     timedOut: res.timedOut,
     finalText: res.lastMessage,
     output: `${res.stdout}\n${res.stderr}`,
-  }
-}
-
-/** Judge a driven cell against tag + exit0 + non-empty + no-error + extras. */
-function judgeCell(
-  cell: MatrixCell,
-  driven: {
-    exitCode: number | null
-    timedOut: boolean
-    finalText: string
-    output: string
-  },
-  traces: Array<TraceInfo>,
-): CellResult {
-  const newest = traces.length > 0 ? traces[0] : null
-  const actualTag = newest?.tag
-  const failures: Array<string> = []
-
-  if (actualTag !== cell.expectedTag) {
-    failures.push(
-      `tag: expected ${cell.expectedTag}, got ${actualTag ?? "<none>"}`,
-    )
-  }
-  if (driven.timedOut) failures.push("client timed out")
-  if (driven.exitCode !== 0) failures.push(`exit code ${driven.exitCode}`)
-  if (driven.finalText.trim().length === 0) failures.push("empty final text")
-  if (/unsupported_api_for_model/i.test(driven.output)) {
-    failures.push("output contains unsupported_api_for_model")
-  }
-  if (/\b(?:HTTP\s*)?400\b|"status"\s*:\s*400/i.test(driven.output)) {
-    failures.push("output contains a raw 400")
-  }
-
-  const ctx: ExtraAssertContext = {
-    exitCode: driven.exitCode,
-    finalText: driven.finalText,
-    output: driven.output,
-    trace: newest,
-    traces,
-  }
-  for (const extra of cell.extraAsserts ?? []) {
-    if (!extra.check(ctx)) failures.push(`extra: ${extra.label}`)
-  }
-
-  return {
-    cell,
-    pass: failures.length === 0,
-    expectedTag: cell.expectedTag,
-    actualTag,
-    exitCode: driven.exitCode,
-    timedOut: driven.timedOut,
-    finalTextLen: driven.finalText.trim().length,
-    failures,
-    tracePath: newest?.file,
-    traceCount: traces.length,
-    durationMs: 0,
   }
 }
 
@@ -222,76 +111,9 @@ async function runCell(
   return result
 }
 
-function renderResults(
-  results: Array<CellResult>,
-  meta: { proxyModels: number; traceDir: string; doctorOk: boolean },
-): string {
-  const date = new Date().toISOString()
-  const passCount = results.filter((r) => r.pass).length
-  const total = results.length
-  const allGreen = passCount === total
-
-  const preamble = [
-    `# Acceptance RESULTS — ${date}`,
-    "",
-    `**${passCount}/${total} PASS** · proxy :4143 served ${meta.proxyModels} models · codex doctor: ${meta.doctorOk ? "ok" : "WARN"}`,
-    "",
-    "> **Preamble.** Judged by the trace-tag oracle (the `.type` of each",
-    "> `<traceDir>/<ts>.req`), not by eyeballing replies. A cell passes only",
-    "> when the egress tag matches, the client exits 0 with non-empty output,",
-    "> and no `unsupported_api_for_model` / raw 400 appears. Some target tags",
-    "> only become correct AFTER the routing fix (pickEgress) lands — cells may",
-    "> legitimately FAIL against pre-fix code; the harness asserts the TARGET.",
-    "",
-    `Trace dir: \`${meta.traceDir}\``,
-    "",
-  ]
-
-  const byMandate = new Map<string, Array<CellResult>>()
-  for (const r of results) {
-    const k = r.cell.mandate
-    if (!byMandate.has(k)) byMandate.set(k, [])
-    byMandate.get(k)?.push(r)
-  }
-
-  const tableRow = (r: CellResult): string => {
-    const result = r.pass ? "PASS" : "FAIL"
-    const notes =
-      r.failures.length > 0 ? r.failures.join("; ") : `${r.traceCount} trace(s)`
-    return `| ${r.cell.id} | ${r.cell.client} | ${r.cell.model} | ${r.expectedTag} | ${r.actualTag ?? "—"} | ${r.exitCode ?? "—"} | ${result} | ${notes} |`
-  }
-
-  const sections = [...byMandate.entries()]
-    .sort()
-    .flatMap(([mandate, rows]) => [
-      `## ${MANDATE_TITLES[mandate as MatrixCell["mandate"]]}`,
-      "",
-      "| Cell | Client | Model | Expected tag | Actual tag | Exit | Result | Notes |",
-      "|---|---|---|---|---|---|---|---|",
-      ...rows.map((r) => tableRow(r)),
-      "",
-    ])
-
-  const evidence = [
-    "## Evidence (trace files)",
-    "",
-    ...results.map(
-      (r) =>
-        `- **${r.cell.id}** (${r.pass ? "PASS" : "FAIL"}): \`${r.tracePath ?? "no trace"}\``,
-    ),
-    "",
-    allGreen ?
-      "**ALL CELLS PASS — completion criteria met.**"
-    : `**${total - passCount} cell(s) FAILED — not complete.**`,
-    "",
-  ]
-
-  return [...preamble, ...sections, ...evidence].join("\n")
-}
-
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2))
-  const cells = selectCells(opts)
+  const cells = selectCells(opts, MATRICES)
 
   if (opts.list) {
     for (const c of cells) {
