@@ -1,30 +1,17 @@
+import consola from "consola"
+
 import { state } from "./state"
 
 /**
- * Decide which Copilot egress endpoint a model accepts, from the live catalog.
+ * Whether a model accepts a given Copilot egress endpoint, per the live catalog.
  *
- * The Copilot `/models` catalog carries a `supported_endpoints` array per model.
- * Some models (e.g. `gpt-5.3-codex`, `gpt-5.5`) are `/responses`-ONLY and 400 with
- * `unsupported_api_for_model` on `/chat/completions`. Inbound handlers call this to
- * pick the egress verb (native `/responses` passthrough vs translate-down to
- * `/chat/completions`) instead of unconditionally translating everything down.
- *
- * This is a pure capability check against `state.models` — each handler applies its
- * own preference. Endpoints are matched exactly, with the leading slash as the
- * catalog stores them (e.g. `"/responses"`, NOT `"responses"`).
+ * Pure capability check against `state.models`: the `/models` catalog carries a
+ * `supported_endpoints` array per model. Endpoints are matched exactly, with the
+ * leading slash as the catalog stores them (e.g. `"/responses"`, NOT
+ * `"responses"`). Returns false when the model is unknown or advertises no
+ * endpoint set — the catalog is the single source of truth (no id-pattern
+ * guessing).
  */
-// Fallback for catalogs that omit `supported_endpoints` entirely (the enterprise
-// backend currently returns no such array on any model). These id patterns mark
-// the /responses-only families — the gpt-5.x reasoning line and the codex models
-// — which 400 with `unsupported_api_for_model` on /chat/completions. Without this
-// the missing array makes modelSupportsEndpoint() report false for /responses, so
-// the routers translate these down to /chat/completions and the backend rejects.
-const RESPONSES_ONLY_ID_PATTERNS = [/^gpt-5/i, /codex/i]
-
-function inferResponsesOnly(modelId: string): boolean {
-  return RESPONSES_ONLY_ID_PATTERNS.some((re) => re.test(modelId))
-}
-
 export function modelSupportsEndpoint(
   modelId: string,
   endpoint: string,
@@ -32,67 +19,57 @@ export function modelSupportsEndpoint(
   const endpoints = state.models?.data.find(
     (model) => model.id === modelId,
   )?.supported_endpoints
-
-  // Authoritative when the catalog actually advertises the endpoint set.
-  if (endpoints && endpoints.length > 0) {
-    return endpoints.includes(endpoint)
-  }
-
-  // Catalog omitted the array — infer /responses support for known responses-only
-  // models so the Claude Code bridge and Codex passthrough route correctly.
-  if (endpoint === "/responses") {
-    return inferResponsesOnly(modelId)
-  }
-  return false
+  return Boolean(endpoints?.includes(endpoint))
 }
 
-// Effort ordering, weakest to strongest. The catalog advertises a per-model
-// subset of these in `capabilities.supports.reasoning_effort`.
-const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh", "max"] as const
+export type HandlerKind = "messages" | "responses" | "chat"
+export type Egress = "/v1/messages" | "/responses" | "/chat/completions"
+export type EgressChoice = Egress | "unsupported"
+
+// Same-protocol first, then the nearest EXISTING cross-leg. Each list only names
+// egress legs that are actually implemented on this branch (see spec §4 Rule B).
+const PREFERENCE: Record<HandlerKind, Array<Egress>> = {
+  responses: ["/responses", "/chat/completions"],
+  messages: ["/v1/messages", "/responses", "/chat/completions"],
+  chat: ["/chat/completions"],
+}
+
+// Fallback egress when a catalog entry advertises NO supported_endpoints at all
+// (20 of 36 enterprise models, e.g. gpt-4o, gpt-4.1, gemini-2.5-pro). The TRUE
+// pre-branch default for every handler was the translate-down /chat/completions
+// path (both the messages and responses handlers fell through to it when the
+// model matched no native endpoint; the chat handler always used it). Returning
+// same-protocol here would route gpt-4o via CC to /v1/messages passthrough and
+// via Codex to /responses passthrough, both of which 400 — a regression.
+const NO_CATALOG_FALLBACK: Egress = "/chat/completions"
 
 /**
- * Clamp a requested reasoning effort to what the target model actually allows.
+ * Pick the Copilot egress endpoint for an inbound handler + model, from the live
+ * catalog. Each inbound handler ("messages" = Claude Code, "responses" = Codex,
+ * "chat" = OpenAI clients) prefers its same-protocol egress, then falls back to
+ * the nearest implemented cross-protocol leg the model advertises.
  *
- * Effort sets differ per model: gpt-5.3-codex tops out at `xhigh` (no `max`),
- * opus-4.8 has the full `max`, the gpt-5.x line adds `none`. Sending `max` to
- * codex 400s. When the requested level is not offered, fall back to the highest
- * allowed level that does not exceed it (so `max`->`xhigh` for codex, never up).
- * Returns the input unchanged if the model advertises no effort set, and
- * `undefined` passes through (no effort requested).
+ * Returns "unsupported" when the model advertises an endpoint set that contains
+ * none of this handler's preferences (the handler maps that to a clean 4xx).
+ * When the model advertises NO set at all, falls back to /chat/completions —
+ * the universal translate-down path that was the prior default for all handlers.
  */
-export function clampReasoningEffort(
-  modelId: string,
-  effort: string | undefined,
-): string | undefined {
-  if (effort === undefined) return undefined
-
+export function pickEgress(kind: HandlerKind, modelId: string): EgressChoice {
   const model = state.models?.data.find((m) => m.id === modelId)
-  // Catalog data is external and looser than the Model type declares — a model
-  // may carry no `capabilities` at all — so probe defensively. The type claims
-  // these are non-optional, hence the eslint suppression; the optional chains
-  // guard against a real runtime crash on capability-less catalog entries.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  const allowed = model?.capabilities?.supports?.reasoning_effort
-  // No advertised set -> nothing to clamp against; pass through unchanged.
-  if (!allowed || allowed.length === 0) return effort
-  if (allowed.includes(effort)) return effort
+  const endpoints = model?.supported_endpoints
 
-  const requestedRank = EFFORT_ORDER.indexOf(
-    effort as (typeof EFFORT_ORDER)[number],
-  )
-  // Unknown effort string -> leave as-is rather than guess.
-  if (requestedRank === -1) return effort
-
-  // Highest allowed level that does not exceed the request.
-  let best: string | undefined
-  let bestRank = -1
-  for (const level of allowed) {
-    const rank = EFFORT_ORDER.indexOf(level as (typeof EFFORT_ORDER)[number])
-    if (rank !== -1 && rank <= requestedRank && rank > bestRank) {
-      best = level
-      bestRank = rank
-    }
+  // No advertised set at all → translate-down fallback (the true prior default),
+  // logged once. NOT same-protocol: gpt-4o et al. are neither Anthropic-native
+  // nor /responses-native, so a passthrough would 400 at the backend.
+  if (!endpoints || endpoints.length === 0) {
+    consola.debug(
+      `[router] ${modelId} advertises no supported_endpoints; falling back to ${NO_CATALOG_FALLBACK}`,
+    )
+    return NO_CATALOG_FALLBACK
   }
-  // If every allowed level is stronger than the request, take the weakest allowed.
-  return best ?? allowed[0]
+
+  for (const ep of PREFERENCE[kind]) {
+    if (endpoints.includes(ep)) return ep
+  }
+  return "unsupported"
 }

@@ -1,11 +1,15 @@
-import { clampReasoningEffort } from "~/lib/endpoint-router"
+import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
+import { deriveAnthropicStopReason } from "~/routes/_shared/stop-reason"
+import {
+  anthropicToolsToResponses,
+  anthropicToolChoiceToResponses,
+} from "~/routes/_shared/tool-translation"
 
 import type {
   ResponseInputContentPart,
   ResponseInputItem,
   ResponseObject,
   ResponsesPayload,
-  ResponseTool,
   ReasoningEffort,
 } from "../responses/responses-types"
 import type {
@@ -14,7 +18,6 @@ import type {
   AnthropicMessagesPayload,
   AnthropicResponse,
   AnthropicTextBlock,
-  AnthropicTool,
   AnthropicToolResultBlock,
 } from "./anthropic-types"
 
@@ -44,8 +47,8 @@ export function translateAnthropicToResponses(
     temperature: payload.temperature,
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
-    tools: translateTools(payload.tools),
-    tool_choice: translateToolChoice(payload.tool_choice),
+    tools: anthropicToolsToResponses(payload.tools),
+    tool_choice: anthropicToolChoiceToResponses(payload.tool_choice),
   }
 
   if (effort) result.reasoning = { effort }
@@ -145,41 +148,6 @@ function stringifyToolResult(
   return text || JSON.stringify(content)
 }
 
-function translateTools(
-  tools?: Array<AnthropicTool>,
-): Array<ResponseTool> | undefined {
-  if (!tools || tools.length === 0) return undefined
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.input_schema,
-  }))
-}
-
-function translateToolChoice(
-  tc: AnthropicMessagesPayload["tool_choice"],
-): ResponsesPayload["tool_choice"] {
-  if (!tc) return undefined
-  switch (tc.type) {
-    case "auto": {
-      return "auto"
-    }
-    case "any": {
-      return "required"
-    }
-    case "none": {
-      return "none"
-    }
-    case "tool": {
-      return tc.name ? { type: "function", name: tc.name } : "auto"
-    }
-    default: {
-      return undefined
-    }
-  }
-}
-
 // =============================================================================
 // OpenAI Responses  ->  Anthropic Messages   (RESPONSE translation)
 // =============================================================================
@@ -214,22 +182,13 @@ export function translateResponsesToAnthropic(
     role: "assistant",
     model,
     content,
-    stop_reason: deriveStopReason(hasToolCall, response.status),
+    stop_reason: deriveAnthropicStopReason(hasToolCall, response.status),
     stop_sequence: null,
     usage: {
       input_tokens: response.usage?.input_tokens ?? 0,
       output_tokens: response.usage?.output_tokens ?? 0,
     },
   }
-}
-
-function deriveStopReason(
-  hasToolCall: boolean,
-  status: ResponseObject["status"],
-): AnthropicResponse["stop_reason"] {
-  if (hasToolCall) return "tool_use"
-  if (status === "incomplete") return "max_tokens"
-  return "end_turn"
 }
 
 function safeParseArgs(args: string): Record<string, unknown> {

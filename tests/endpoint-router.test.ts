@@ -2,10 +2,7 @@ import { describe, test, expect, afterEach } from "bun:test"
 
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
-import {
-  clampReasoningEffort,
-  modelSupportsEndpoint,
-} from "../src/lib/endpoint-router"
+import { modelSupportsEndpoint, pickEgress } from "../src/lib/endpoint-router"
 import { state } from "../src/lib/state"
 
 // Minimal fixture-shaped catalog (mirrors the real /models shape for the fields
@@ -82,25 +79,26 @@ describe("modelSupportsEndpoint", () => {
     expect(modelSupportsEndpoint("does-not-exist", "/responses")).toBe(false)
   })
 
-  test("returns false when a non-responses-only model omits the field", () => {
+  test("returns false when a model omits the supported_endpoints field", () => {
     state.models = fixtureModels
-    // `no-endpoints` is not a gpt-5/codex id, so the inference does not apply.
+    // `no-endpoints` advertises no endpoint set, so the pure-catalog read reports
+    // false (modelSupportsEndpoint never guesses from the id).
     expect(modelSupportsEndpoint("no-endpoints", "/responses")).toBe(false)
   })
 
-  test("infers /responses for a gpt-5 model when the catalog omits the field", () => {
+  test("returns false when a gpt-5 model omits the field (no regex inference)", () => {
     state.models = fixtureModels
-    // Enterprise catalogs return no supported_endpoints array at all; the router
-    // must still route gpt-5.x to /responses or the bridge 400s on /chat/completions.
-    expect(modelSupportsEndpoint("gpt-5.7", "/responses")).toBe(true)
-    // The inference is scoped to /responses only — never invents other endpoints.
+    // The catalog is the single source of truth: a model that advertises no
+    // supported_endpoints is treated as supporting none here. (pickEgress applies
+    // a same-protocol fallback for these; modelSupportsEndpoint does not guess.)
+    expect(modelSupportsEndpoint("gpt-5.7", "/responses")).toBe(false)
     expect(modelSupportsEndpoint("gpt-5.7", "/chat/completions")).toBe(false)
   })
 
-  test("infers /responses for a responses-only model when the catalog has not loaded yet", () => {
+  test("returns false for any model when the catalog has not loaded yet", () => {
     state.models = undefined
-    // Before the catalog loads we still route known responses-only ids correctly.
-    expect(modelSupportsEndpoint("gpt-5.3-codex", "/responses")).toBe(true)
+    // No catalog -> no advertised endpoints -> false (no id-pattern inference).
+    expect(modelSupportsEndpoint("gpt-5.3-codex", "/responses")).toBe(false)
   })
 
   test("returns false for an unknown model when the catalog has not loaded yet", () => {
@@ -109,47 +107,46 @@ describe("modelSupportsEndpoint", () => {
   })
 })
 
-describe("clampReasoningEffort", () => {
+describe("pickEgress (per-handler, catalog-truth)", () => {
   afterEach(() => {
     state.models = undefined
   })
 
-  test("clamps max -> xhigh for codex (no max allowed)", () => {
+  test("Codex+gpt-5.4 → /responses (same-protocol)", () => {
     state.models = fixtureModels
-    expect(clampReasoningEffort("gpt-5.3-codex", "max")).toBe("xhigh")
+    expect(pickEgress("responses", "gpt-5.4")).toBe("/responses")
   })
-
-  test("passes through an allowed level unchanged", () => {
+  test("CC+gpt-5.4 → /responses (no messages; nearest cross)", () => {
     state.models = fixtureModels
-    expect(clampReasoningEffort("gpt-5.3-codex", "high")).toBe("high")
-    expect(clampReasoningEffort("gpt-5.5", "xhigh")).toBe("xhigh")
-    expect(clampReasoningEffort("claude-opus-4.8", "max")).toBe("max")
+    expect(pickEgress("messages", "gpt-5.4")).toBe("/responses")
   })
-
-  test("clamps DOWN to the highest allowed not exceeding the request", () => {
+  test("OpenAI+gpt-5.4 → /chat/completions (same-protocol)", () => {
     state.models = fixtureModels
-    // codex allows up to xhigh; a hypothetical request above it lands on xhigh.
-    expect(clampReasoningEffort("gpt-5.3-codex", "max")).toBe("xhigh")
+    expect(pickEgress("chat", "gpt-5.4")).toBe("/chat/completions")
   })
-
-  test("returns undefined when no effort is requested", () => {
+  test("OpenAI+gpt-5.5 (responses-only) → unsupported", () => {
     state.models = fixtureModels
-    expect(clampReasoningEffort("gpt-5.3-codex", undefined)).toBeUndefined()
+    expect(pickEgress("chat", "gpt-5.5")).toBe("unsupported")
   })
-
-  test("passes effort through when the model advertises no effort set", () => {
+  test("CC+claude-opus-4.8 → /v1/messages (passthrough)", () => {
     state.models = fixtureModels
-    // gpt-5.4 has no reasoning_effort in the fixture -> nothing to clamp against.
-    expect(clampReasoningEffort("gpt-5.4", "max")).toBe("max")
+    expect(pickEgress("messages", "claude-opus-4.8")).toBe("/v1/messages")
   })
-
-  test("passes effort through for an unknown model", () => {
+  test("Codex+claude-opus-4.8 → /chat/completions (translate-down)", () => {
     state.models = fixtureModels
-    expect(clampReasoningEffort("does-not-exist", "max")).toBe("max")
+    expect(pickEgress("responses", "claude-opus-4.8")).toBe("/chat/completions")
   })
-
-  test("leaves an unrecognized effort string as-is", () => {
-    state.models = fixtureModels
-    expect(clampReasoningEffort("gpt-5.3-codex", "ludicrous")).toBe("ludicrous")
+  test("model with NO supported_endpoints → /chat/completions translate-down (all handlers)", () => {
+    // 20/36 enterprise models (gpt-4o, gpt-4.1, gemini-2.5-pro, ...) carry no
+    // supported_endpoints. The true prior default was the translate-down
+    // /chat/completions path on ALL handlers — NOT same-protocol passthrough,
+    // which would 400 (these are neither Anthropic-native nor /responses-native).
+    state.models = {
+      object: "list",
+      data: [{ id: "mystery-model" }],
+    } as unknown as ModelsResponse
+    expect(pickEgress("messages", "mystery-model")).toBe("/chat/completions")
+    expect(pickEgress("responses", "mystery-model")).toBe("/chat/completions")
+    expect(pickEgress("chat", "mystery-model")).toBe("/chat/completions")
   })
 })

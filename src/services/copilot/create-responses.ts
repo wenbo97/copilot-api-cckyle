@@ -19,6 +19,8 @@ export const createResponses = async (payload: ResponsesPayload) => {
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
+  const body = sanitizeReasoningItems(payload)
+
   const extraHeaders: Record<string, string> = {
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
@@ -26,7 +28,7 @@ export const createResponses = async (payload: ResponsesPayload) => {
 
   const response = await copilotFetch("/responses", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
     extraHeaders,
   })
 
@@ -35,6 +37,25 @@ export const createResponses = async (payload: ResponsesPayload) => {
   }
 
   return (await response.json()) as ResponseObject
+}
+
+// Apply sanitizeReasoningItem to every reasoning item in the input so multi-turn
+// replay preserves encrypted_content and never forwards a null status. Returns
+// the payload unchanged when input is a bare string or carries no reasoning items.
+function sanitizeReasoningItems(payload: ResponsesPayload): ResponsesPayload {
+  if (typeof payload.input === "string") return payload
+  if (!payload.input.some((item) => isReasoningItem(item))) return payload
+
+  const input = payload.input.map((item) =>
+    isReasoningItem(item) ?
+      sanitizeReasoningItem(item as unknown as ReasoningItem)
+    : item,
+  )
+  return { ...payload, input: input as ResponsesPayload["input"] }
+}
+
+function isReasoningItem(item: unknown): boolean {
+  return (item as { type?: string }).type === "reasoning"
 }
 
 // The wire shape of `input` items is looser than the strict request union
@@ -65,4 +86,37 @@ function hasAgentMessages(payload: ResponsesPayload): boolean {
       || type === "function_call_output"
     )
   })
+}
+
+// A reasoning item as it arrives on the wire (loose: fields are optional and may
+// be null). Only the shape we read/forward is named.
+export interface ReasoningItem {
+  type: "reasoning"
+  id?: string
+  status?: string | null
+  encrypted_content?: string | null
+  [key: string]: unknown
+}
+
+/**
+ * Normalize a `reasoning` item for multi-turn replay to the Copilot /responses
+ * backend (port of litellm `_handle_reasoning_item`).
+ *
+ * Copilot reasoning items carry `encrypted_content`, the opaque blob that lets
+ * the backend verify and continue an earlier chain of thought. The naive path
+ * drops it (→ "encrypted content could not be verified" on the next turn). We
+ * keep `encrypted_content` when present, drop `status` when it is null (OpenAI
+ * rejects a null status), and keep every other non-null field as-is.
+ */
+export function sanitizeReasoningItem(
+  item: ReasoningItem,
+): Record<string, unknown> {
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(item)) {
+    // Drop null fields outright (e.g. status: null, summary: null). The backend
+    // 400s on a null status, and a null elsewhere carries no information.
+    if (value === null) continue
+    cleaned[key] = value
+  }
+  return cleaned
 }

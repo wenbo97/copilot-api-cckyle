@@ -4,8 +4,8 @@ import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
-import { modelSupportsEndpoint } from "~/lib/endpoint-router"
-import { applyModelMapping, getModelMappings } from "~/lib/model-mapping"
+import { pickEgress } from "~/lib/endpoint-router"
+import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
@@ -44,37 +44,42 @@ export async function handleCompletion(c: Context) {
   let anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
-  // Apply model mapping if configured
-  const originalModel = anthropicPayload.model
-  const mappings = getModelMappings()
-  if (mappings.size > 0) {
-    const { model, mapped } = applyModelMapping(
-      anthropicPayload.model,
-      mappings,
-      state.verbose,
+  // Normalize the requested model id to a catalog id ONCE (exact id → alias →
+  // strip [..] suffix), then route under that id.
+  const resolved = resolveModelId(anthropicPayload.model)
+  if (resolved !== anthropicPayload.model) {
+    consola.info(
+      `[Anthropic] Model resolved: "${anthropicPayload.model}" -> "${resolved}"`,
     )
-    if (mapped) {
-      consola.info(
-        `[Anthropic] Model mapping: "${originalModel}" -> "${model}"`,
-      )
-      anthropicPayload = { ...anthropicPayload, model }
-    }
+    anthropicPayload = { ...anthropicPayload, model: resolved }
   }
 
-  // Endpoint routing: if the resolved model natively accepts /v1/messages (every
-  // Claude model does), forward the Anthropic request straight through with NO
-  // translation — lossless, preserving thinking blocks, cache_control, and native
-  // usage details the Messages->ChatCompletions->Messages round-trip would drop.
-  if (modelSupportsEndpoint(anthropicPayload.model, "/v1/messages")) {
+  // Pick the egress endpoint from the live catalog for the Claude Code
+  // (/v1/messages) inbound:
+  //   /v1/messages      → native passthrough (lossless: thinking, cache_control,
+  //                       native usage survive). Every Claude model advertises it.
+  //   /responses        → Messages⇄Responses bridge so CC can reach /responses-only
+  //                       models (gpt-5.5, gpt-5.3-codex). Documented-lossy cross.
+  //   /chat/completions → legacy translate-down path.
+  //   unsupported       → clean 4xx (no implemented leg for this model).
+  const egress = pickEgress("messages", anthropicPayload.model)
+  if (egress === "/v1/messages") {
     return handlePassthroughMessages(c, anthropicPayload)
   }
-
-  // Else if the model is /responses-native (gpt-5.5, gpt-5.3-codex), bridge
-  // Anthropic Messages <-> OpenAI Responses so Claude Code can reach it. This is
-  // a documented-lossy cross-protocol path (reasoning original text is encrypted
-  // by the backend; cache_control / strict tools / top_k do not map).
-  if (modelSupportsEndpoint(anthropicPayload.model, "/responses")) {
+  if (egress === "/responses") {
     return handleCompletionViaResponses(c, anthropicPayload)
+  }
+  if (egress === "unsupported") {
+    return c.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: `Model "${anthropicPayload.model}" is not reachable via /v1/messages, /responses, or /chat/completions.`,
+        },
+      },
+      400,
+    )
   }
 
   // Trace the original Anthropic request
@@ -167,8 +172,8 @@ const isNonStreaming = (
  * Native /v1/messages passthrough for Claude models. No translation in either
  * direction — the Anthropic request body is forwarded as-is and the native
  * Anthropic response / SSE frames are returned unchanged (lossless). The exact
- * resolved catalog model id is preserved (translateModelName is NOT applied here,
- * since it would collapse claude-opus-4.8 -> claude-opus-4). Tracing still runs.
+ * resolved catalog model id (from resolveModelId at handler entry) is preserved.
+ * Tracing still runs.
  */
 async function handlePassthroughMessages(
   c: Context,

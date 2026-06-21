@@ -32,12 +32,23 @@ export interface ResponsesPayload {
 
 export type ResponseInputItem =
   | ResponseInputMessage
+  | ResponseInputFunctionCall
   | ResponseInputFunctionCallOutput
 
 export interface ResponseInputMessage {
   type?: "message"
   role: "user" | "assistant" | "system" | "developer"
   content: string | Array<ResponseInputContentPart>
+}
+
+// A prior assistant tool *invocation*, echoed back as an input item on the next
+// turn. Shares `call_id` with ResponseInputFunctionCallOutput, so consumers MUST
+// discriminate by `type` (see responses/non-stream-translation.ts).
+export interface ResponseInputFunctionCall {
+  type: "function_call"
+  call_id: string
+  name: string
+  arguments: string
 }
 
 export interface ResponseInputFunctionCallOutput {
@@ -133,6 +144,13 @@ export interface ResponseStreamState {
   outputItemIndex: number
   contentPartIndex: number
   messageStarted: boolean
+  // Accumulated assistant text, so the terminal output_text.done / output_item.done
+  // can carry the real message instead of an empty placeholder. Optional so the
+  // handler's state literal needs no change (the translator defaults it).
+  textContent?: string
+  // Whether a text message output item was opened (text arrived before any tool
+  // call). Drives whether we emit the text .done frames at finish.
+  messageItemOpen?: boolean
   toolCalls: Record<
     number,
     {
@@ -140,6 +158,8 @@ export interface ResponseStreamState {
       callId: string
       name: string
       outputItemIndex: number
+      // Accumulated arguments fragments, closed out at finish.
+      arguments: string
     }
   >
 }

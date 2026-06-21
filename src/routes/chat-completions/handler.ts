@@ -4,7 +4,8 @@ import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
-import { applyModelMapping, getModelMappings } from "~/lib/model-mapping"
+import { pickEgress } from "~/lib/endpoint-router"
+import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -22,21 +23,32 @@ export async function handleCompletion(c: Context) {
   let payload = await c.req.json<ChatCompletionsPayload>()
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
-  // Apply model mapping if configured
-  const originalModel = payload.model
-  const mappings = getModelMappings()
-  if (mappings.size > 0) {
-    const { model, mapped } = applyModelMapping(
-      payload.model,
-      mappings,
-      state.verbose,
-    )
-    if (mapped) {
-      consola.info(`[OpenAI] Model mapping: "${originalModel}" -> "${model}"`)
-      payload = { ...payload, model }
-    }
+  // Normalize the requested model id to a catalog id ONCE (exact id → alias →
+  // strip [..] suffix), then route under that id.
+  const resolved = resolveModelId(payload.model)
+  if (resolved !== payload.model) {
+    consola.info(`[OpenAI] Model resolved: "${payload.model}" -> "${resolved}"`)
+    payload = { ...payload, model: resolved }
   }
   consola.info(`[OpenAI] Using model: "${payload.model}"`)
+
+  // The OpenAI (/chat/completions) inbound only has a same-protocol egress. If the
+  // model doesn't advertise /chat/completions (e.g. the /responses-only gpt-5.5,
+  // gpt-5.3-codex), reaching it from a generic OpenAI client is out of scope — fail
+  // with a clean 4xx instead of letting the backend reject it with a raw 400.
+  const egress = pickEgress("chat", payload.model)
+  if (egress !== "/chat/completions") {
+    return c.json(
+      {
+        error: {
+          message: `Model "${payload.model}" is not reachable via /v1/chat/completions. Use the /v1/responses endpoint for this model.`,
+          type: "invalid_request_error",
+          code: "unsupported_api_for_model",
+        },
+      },
+      400,
+    )
+  }
 
   // Trace the request
   const traceTimestamp = await traceRequest(payload)
