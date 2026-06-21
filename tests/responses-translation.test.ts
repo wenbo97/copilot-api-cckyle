@@ -621,3 +621,64 @@ describe("CHARACTERIZATION: translateToOpenAI message routing (stable parts, pre
     })
   })
 })
+
+// =============================================================================
+// T4: function_call vs function_call_output disambiguation.
+//
+// Both Responses input items carry `call_id`, so the old `"call_id" in item`
+// discriminator misrouted an assistant `function_call` (a tool *invocation*) as
+// a `role: "tool"` result. A function_call must become an assistant message with
+// `tool_calls`; only the function_call_output becomes a `role: "tool"` message.
+// =============================================================================
+
+describe("translateToOpenAI: function_call vs function_call_output (T4)", () => {
+  test("function_call input item is NOT misrouted as a tool result", () => {
+    const out = translateToOpenAI({
+      model: "claude-opus-4.8",
+      input: [
+        {
+          type: "function_call",
+          call_id: "c1",
+          name: "f",
+          arguments: "{}",
+        } as never,
+        { type: "function_call_output", call_id: "c1", output: "ok" } as never,
+      ],
+    })
+    // Exactly one role:tool message (the output), never two.
+    const toolMsgs = out.messages.filter((m) => m.role === "tool")
+    expect(toolMsgs.length).toBe(1)
+    expect(toolMsgs[0]).toEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "ok",
+    })
+  })
+
+  test("function_call becomes an assistant tool_calls message", () => {
+    const out = translateToOpenAI({
+      model: "claude-opus-4.8",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_42",
+          name: "get_weather",
+          arguments: '{"city":"Paris"}',
+        } as never,
+      ],
+    })
+    expect(out.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_42",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+          },
+        ],
+      },
+    ])
+  })
+})

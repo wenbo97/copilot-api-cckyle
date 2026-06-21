@@ -8,6 +8,7 @@ import {
 
 import type {
   ResponseInputContentPart,
+  ResponseInputFunctionCall,
   ResponseInputFunctionCallOutput,
   ResponseInputItem,
   ResponseObject,
@@ -53,10 +54,27 @@ function translateInputToMessages(
 
   for (const item of input) {
     if (isFunctionCallOutput(item)) {
+      // Tool *result* (user turn) -> a role:tool message.
       messages.push({
         role: "tool",
         tool_call_id: item.call_id,
         content: item.output,
+      })
+    } else if (isFunctionCall(item)) {
+      // Tool *invocation* (assistant turn) -> an assistant message carrying
+      // tool_calls. Both items share `call_id`, so they MUST be told apart by
+      // `type`, not by key presence (the old "call_id" in item check misrouted
+      // this as a second role:tool message).
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: item.call_id,
+            type: "function",
+            function: { name: item.name, arguments: item.arguments },
+          },
+        ],
       })
     } else {
       const msg = item
@@ -74,7 +92,13 @@ function translateInputToMessages(
 function isFunctionCallOutput(
   item: ResponseInputItem,
 ): item is ResponseInputFunctionCallOutput {
-  return "call_id" in item
+  return (item as { type?: string }).type === "function_call_output"
+}
+
+function isFunctionCall(
+  item: ResponseInputItem,
+): item is ResponseInputFunctionCall {
+  return (item as { type?: string }).type === "function_call"
 }
 
 function translateContent(
