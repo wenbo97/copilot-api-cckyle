@@ -136,13 +136,17 @@ describe("pickEgress (per-handler, catalog-truth)", () => {
     state.models = fixtureModels
     expect(pickEgress("responses", "claude-opus-4.8")).toBe("/chat/completions")
   })
-  test("model with NO supported_endpoints → same-protocol fallback (logged)", () => {
+  test("model with NO supported_endpoints → /chat/completions translate-down (all handlers)", () => {
+    // 20/36 enterprise models (gpt-4o, gpt-4.1, gemini-2.5-pro, ...) carry no
+    // supported_endpoints. The true prior default was the translate-down
+    // /chat/completions path on ALL handlers — NOT same-protocol passthrough,
+    // which would 400 (these are neither Anthropic-native nor /responses-native).
     state.models = {
       object: "list",
       data: [{ id: "mystery-model" }],
     } as unknown as ModelsResponse
-    expect(pickEgress("messages", "mystery-model")).toBe("/v1/messages")
-    expect(pickEgress("responses", "mystery-model")).toBe("/responses")
+    expect(pickEgress("messages", "mystery-model")).toBe("/chat/completions")
+    expect(pickEgress("responses", "mystery-model")).toBe("/chat/completions")
     expect(pickEgress("chat", "mystery-model")).toBe("/chat/completions")
   })
 })

@@ -34,11 +34,14 @@ const PREFERENCE: Record<HandlerKind, Array<Egress>> = {
   chat: ["/chat/completions"],
 }
 
-const SAME_PROTOCOL: Record<HandlerKind, Egress> = {
-  responses: "/responses",
-  messages: "/v1/messages",
-  chat: "/chat/completions",
-}
+// Fallback egress when a catalog entry advertises NO supported_endpoints at all
+// (20 of 36 enterprise models, e.g. gpt-4o, gpt-4.1, gemini-2.5-pro). The TRUE
+// pre-branch default for every handler was the translate-down /chat/completions
+// path (both the messages and responses handlers fell through to it when the
+// model matched no native endpoint; the chat handler always used it). Returning
+// same-protocol here would route gpt-4o via CC to /v1/messages passthrough and
+// via Codex to /responses passthrough, both of which 400 — a regression.
+const NO_CATALOG_FALLBACK: Egress = "/chat/completions"
 
 /**
  * Pick the Copilot egress endpoint for an inbound handler + model, from the live
@@ -48,19 +51,21 @@ const SAME_PROTOCOL: Record<HandlerKind, Egress> = {
  *
  * Returns "unsupported" when the model advertises an endpoint set that contains
  * none of this handler's preferences (the handler maps that to a clean 4xx).
- * When the model advertises NO set at all, falls back to same-protocol (the prior
- * default) and logs once.
+ * When the model advertises NO set at all, falls back to /chat/completions —
+ * the universal translate-down path that was the prior default for all handlers.
  */
 export function pickEgress(kind: HandlerKind, modelId: string): EgressChoice {
   const model = state.models?.data.find((m) => m.id === modelId)
   const endpoints = model?.supported_endpoints
 
-  // No advertised set at all → same-protocol fallback (previous default), logged once.
+  // No advertised set at all → translate-down fallback (the true prior default),
+  // logged once. NOT same-protocol: gpt-4o et al. are neither Anthropic-native
+  // nor /responses-native, so a passthrough would 400 at the backend.
   if (!endpoints || endpoints.length === 0) {
     consola.debug(
-      `[router] ${modelId} advertises no supported_endpoints; falling back to same-protocol ${SAME_PROTOCOL[kind]}`,
+      `[router] ${modelId} advertises no supported_endpoints; falling back to ${NO_CATALOG_FALLBACK}`,
     )
-    return SAME_PROTOCOL[kind]
+    return NO_CATALOG_FALLBACK
   }
 
   for (const ep of PREFERENCE[kind]) {
