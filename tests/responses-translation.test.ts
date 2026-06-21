@@ -1,7 +1,11 @@
 import { describe, test, expect, afterEach } from "bun:test"
 
 import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
-import type { ResponseObject } from "../src/routes/responses/responses-types"
+import type {
+  ResponseObject,
+  ResponseStreamState,
+} from "../src/routes/responses/responses-types"
+import type { ChatCompletionChunk } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { state } from "../src/lib/state"
@@ -14,6 +18,7 @@ import {
   translateResponsesToAnthropic,
 } from "../src/routes/messages/responses-translation"
 import { translateToOpenAI } from "../src/routes/responses/non-stream-translation"
+import { translateChunkToResponseEvents } from "../src/routes/responses/stream-translation"
 
 // Catalog so clampReasoningEffort has effort sets to clamp against.
 const fixtureModels = {
@@ -680,5 +685,130 @@ describe("translateToOpenAI: function_call vs function_call_output (T4)", () => 
         ],
       },
     ])
+  })
+})
+
+// =============================================================================
+// T8: Chat-Completions stream -> Responses stream P2 fixes.
+//
+// (a) A tool call must emit a terminal `response.output_item.done` so strict
+//     Responses clients can close the function_call item.
+// (b) When the turn produced NO assistant text, we must NOT emit empty
+//     `response.output_text.done` / `response.content_part.done` frames — they
+//     reference an output item / content part that was never opened.
+// =============================================================================
+
+const freshStreamState = (): ResponseStreamState => ({
+  responseId: "",
+  model: "",
+  outputItemIndex: 0,
+  contentPartIndex: 0,
+  messageStarted: false,
+  toolCalls: {},
+})
+
+const chunkOf = (
+  choice: Partial<ChatCompletionChunk["choices"][number]>,
+): ChatCompletionChunk =>
+  ({
+    id: "chatcmpl_1",
+    object: "chat.completion.chunk",
+    created: 0,
+    model: "claude-opus-4.8",
+    choices: [
+      { index: 0, delta: {}, finish_reason: null, logprobs: null, ...choice },
+    ],
+  }) as ChatCompletionChunk
+
+describe("translateChunkToResponseEvents: tool-call done + empty .done (T8)", () => {
+  test("a tool call emits response.output_item.done on finish", () => {
+    const state = freshStreamState()
+    const events = [
+      ...translateChunkToResponseEvents(
+        chunkOf({
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                function: { name: "get_weather", arguments: '{"city":"NYC"}' },
+              },
+            ],
+          },
+        }),
+        state,
+      ),
+      ...translateChunkToResponseEvents(
+        chunkOf({ delta: {}, finish_reason: "tool_calls" }),
+        state,
+      ),
+    ]
+
+    const done = events.filter((e) => e.type === "response.output_item.done")
+    expect(done.length).toBe(1)
+    const item = (
+      done[0] as {
+        item: { type: string; call_id: string; arguments: string }
+      }
+    ).item
+    expect(item.type).toBe("function_call")
+    expect(item.call_id).toBe("call_1")
+    // The done item carries the FULL accumulated arguments (not empty).
+    expect(item.arguments).toBe('{"city":"NYC"}')
+  })
+
+  test("no empty output_text.done / content_part.done when there was no text", () => {
+    const state = freshStreamState()
+    const events = [
+      ...translateChunkToResponseEvents(
+        chunkOf({
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                function: { name: "f", arguments: "{}" },
+              },
+            ],
+          },
+        }),
+        state,
+      ),
+      ...translateChunkToResponseEvents(
+        chunkOf({ delta: {}, finish_reason: "tool_calls" }),
+        state,
+      ),
+    ]
+
+    expect(events.some((e) => e.type === "response.output_text.done")).toBe(
+      false,
+    )
+    expect(events.some((e) => e.type === "response.content_part.done")).toBe(
+      false,
+    )
+  })
+
+  test("a text turn still emits its output_text.done + content_part.done", () => {
+    const state = freshStreamState()
+    const events = [
+      ...translateChunkToResponseEvents(
+        chunkOf({ delta: { content: "hello" } }),
+        state,
+      ),
+      ...translateChunkToResponseEvents(
+        chunkOf({ delta: {}, finish_reason: "stop" }),
+        state,
+      ),
+    ]
+    expect(events.some((e) => e.type === "response.output_text.done")).toBe(
+      true,
+    )
+    expect(events.some((e) => e.type === "response.content_part.done")).toBe(
+      true,
+    )
+    // ...and the message item is closed.
+    expect(events.some((e) => e.type === "response.output_item.done")).toBe(
+      true,
+    )
   })
 })
