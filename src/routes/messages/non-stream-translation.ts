@@ -1,4 +1,5 @@
 import { mapThinkingToReasoningEffort } from "~/routes/_shared/reasoning-policy"
+import { truncateToolName } from "~/routes/_shared/tool-name"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -284,7 +285,9 @@ function translateAnthropicToolsToOpenAI(
   return anthropicTools.map((tool) => ({
     type: "function",
     function: {
-      name: tool.name,
+      // OpenAI caps function names at 64 chars; Anthropic does not. Truncate so
+      // the Messages->Chat path matches the Messages->Responses path (spec §5⑤d).
+      name: truncateToolName(tool.name),
       description: tool.description,
       parameters: tool.input_schema,
     },

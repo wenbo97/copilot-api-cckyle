@@ -49,7 +49,11 @@ export function anthropicToolChoiceToResponses(
       return "none"
     }
     case "tool": {
-      return tc.name ? { type: "function", name: tc.name } : "auto"
+      // Truncate symmetrically with the tool DEFINITION name above, else a forced
+      // choice on a >64-char name would reference a tool absent from the list.
+      return tc.name ?
+          { type: "function", name: truncateToolName(tc.name) }
+        : "auto"
     }
     default: {
       return undefined

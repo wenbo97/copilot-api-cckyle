@@ -53,6 +53,18 @@ describe("anthropicToolChoiceToResponses", () => {
     expect(anthropicToolChoiceToResponses(undefined)).toBeUndefined()
     expect(anthropicToolChoiceToResponses({ type: "tool" })).toBe("auto")
   })
+
+  test("truncates a forced tool name symmetrically with the tool list", () => {
+    const long = "z".repeat(80)
+    const choice = anthropicToolChoiceToResponses({ type: "tool", name: long })
+    const tools = anthropicToolsToResponses([
+      { name: long, input_schema: { type: "object" } },
+    ] as Array<AnthropicTool>)
+    // The forced choice must reference the SAME (truncated) name as the tool def,
+    // else the backend can't resolve it. Both go through truncateToolName.
+    expect((choice as { name: string }).name).toBe(tools?.[0].name as string)
+    expect((choice as { name: string }).name.length).toBe(64)
+  })
 })
 
 describe("deriveAnthropicStopReason", () => {
