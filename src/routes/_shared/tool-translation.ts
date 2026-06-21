@@ -1,0 +1,55 @@
+import type {
+  AnthropicMessagesPayload,
+  AnthropicTool,
+} from "~/routes/messages/anthropic-types"
+import type {
+  ResponsesPayload,
+  ResponseTool,
+} from "~/routes/responses/responses-types"
+
+// =============================================================================
+// Shared Anthropic -> OpenAI Responses tool translation.
+//
+// Single source of truth lifted from messages/responses-translation.ts so the
+// non-stream and stream Anthropic->Responses bridges can't drift apart. The
+// Responses-direction translateTools in responses/non-stream-translation.ts
+// handles a DIFFERENT (Chat-format) input shape and is intentionally NOT merged
+// here.
+// =============================================================================
+
+/** Anthropic `tools` -> OpenAI Responses function tools. Empty/undefined -> undefined. */
+export function anthropicToolsToResponses(
+  tools?: Array<AnthropicTool>,
+): Array<ResponseTool> | undefined {
+  if (!tools || tools.length === 0) return undefined
+  return tools.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.input_schema,
+  }))
+}
+
+/** Anthropic `tool_choice` -> OpenAI Responses `tool_choice`. */
+export function anthropicToolChoiceToResponses(
+  tc: AnthropicMessagesPayload["tool_choice"],
+): ResponsesPayload["tool_choice"] {
+  if (!tc) return undefined
+  switch (tc.type) {
+    case "auto": {
+      return "auto"
+    }
+    case "any": {
+      return "required"
+    }
+    case "none": {
+      return "none"
+    }
+    case "tool": {
+      return tc.name ? { type: "function", name: tc.name } : "auto"
+    }
+    default: {
+      return undefined
+    }
+  }
+}
