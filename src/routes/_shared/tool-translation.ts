@@ -7,6 +7,8 @@ import type {
   ResponseTool,
 } from "~/routes/responses/responses-types"
 
+import { truncateToolName } from "./tool-name"
+
 // =============================================================================
 // Shared Anthropic -> OpenAI Responses tool translation.
 //
@@ -24,7 +26,8 @@ export function anthropicToolsToResponses(
   if (!tools || tools.length === 0) return undefined
   return tools.map((tool) => ({
     type: "function",
-    name: tool.name,
+    // OpenAI rejects tool names >64 chars; Anthropic does not cap them.
+    name: truncateToolName(tool.name),
     description: tool.description,
     parameters: tool.input_schema,
   }))

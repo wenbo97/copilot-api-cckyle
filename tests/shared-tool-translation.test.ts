@@ -27,6 +27,14 @@ describe("anthropicToolsToResponses", () => {
     expect(anthropicToolsToResponses(undefined)).toBeUndefined()
     expect(anthropicToolsToResponses([])).toBeUndefined()
   })
+
+  test("applies 64-char tool-name truncation (T5 wiring)", () => {
+    const long = "z".repeat(80)
+    const out = anthropicToolsToResponses([
+      { name: long, input_schema: { type: "object" } },
+    ] as Array<AnthropicTool>)
+    expect(out?.[0].name.length).toBe(64)
+  })
 })
 
 describe("anthropicToolChoiceToResponses", () => {
