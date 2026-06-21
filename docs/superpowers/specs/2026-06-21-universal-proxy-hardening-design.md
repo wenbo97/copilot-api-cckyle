@@ -92,8 +92,11 @@ P2 follow-up.
   `pickEgress(handlerKind, modelId)` returning the chosen endpoint (or a typed "unsupported" the handler maps
   to a clean 4xx, not a backend 400).
 - **Narrowed safety fallback (kept, not regex):** only if a catalog entry has **no** `supported_endpoints`
-  array at all, fall back to that handler's same-protocol endpoint (the previous default behavior), logged
-  once. No id-pattern guessing.
+  array at all (20/36 enterprise models — gpt-4o, gpt-4.1, gemini-2.5-pro, …), fall back to the
+  `/chat/completions` translate-down path for **all** handlers, logged once. This is the true pre-branch
+  default (both the messages and responses handlers fell through to translate-down when a model matched no
+  native endpoint; the chat handler always used it). It is **not** same-protocol — routing gpt-4o to
+  `/v1/messages` or `/responses` passthrough would 400. No id-pattern guessing.
 - **Wire the Chat handler in** (⑤b): `chat-completions/handler.ts` joins the same `pickEgress` rule so a
   `/responses`-only model requested by an OpenAI client returns a **clean 4xx** (model not reachable via this
   protocol), not a raw backend 400.
