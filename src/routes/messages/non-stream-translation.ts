@@ -31,7 +31,11 @@ export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
 ): ChatCompletionsPayload {
   return {
-    model: translateModelName(payload.model),
+    // The model id is already a catalog id here: the handler resolves it via
+    // resolveModelId() before dispatch. No further rewrite (the old
+    // translateModelName collapsed claude-opus-4.8 -> claude-opus-4, which would
+    // now corrupt a correct catalog id).
+    model: payload.model,
     messages: sanitizeTrailingAssistant(
       translateAnthropicMessagesToOpenAI(payload.messages, payload.system),
     ),
@@ -96,16 +100,6 @@ function extractTextForSanitization(content: Message["content"]): string {
     .filter((part): part is TextPart => part.type === "text")
     .map((part) => part.text)
     .join("")
-}
-
-function translateModelName(model: string): string {
-  // Subagent requests use a specific model number which Copilot doesn't support
-  if (model.startsWith("claude-sonnet-4-")) {
-    return model.replace(/^claude-sonnet-4-.*/, "claude-sonnet-4")
-  } else if (model.startsWith("claude-opus-")) {
-    return model.replace(/^claude-opus-4-.*/, "claude-opus-4")
-  }
-  return model
 }
 
 function translateAnthropicMessagesToOpenAI(

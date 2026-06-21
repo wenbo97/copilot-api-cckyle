@@ -4,8 +4,8 @@ import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
-import { modelSupportsEndpoint } from "~/lib/endpoint-router"
-import { applyModelMapping, getModelMappings } from "~/lib/model-mapping"
+import { pickEgress } from "~/lib/endpoint-router"
+import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
@@ -17,8 +17,13 @@ import {
 import { createResponses } from "~/services/copilot/create-responses"
 
 import type { ResponseObject } from "./responses-types"
-import type { ResponsesPayload, ResponseStreamState } from "./responses-types"
+import type {
+  ResponsesPayload,
+  ResponseStreamState,
+  ResponseStreamEvent,
+} from "./responses-types"
 
+import { StreamItemIdNormalizer } from "../_shared/stream-item-id"
 import {
   translateToOpenAI,
   translateToResponses,
@@ -34,31 +39,35 @@ export async function handleResponses(c: Context) {
     JSON.stringify(payload).slice(-400),
   )
 
-  // Apply model mapping if configured
-  const originalModel = payload.model
-  const mappings = getModelMappings()
-  if (mappings.size > 0) {
-    const { model, mapped } = applyModelMapping(
-      payload.model,
-      mappings,
-      state.verbose,
+  // Normalize the requested model id to a catalog id ONCE (exact id → alias →
+  // strip [..] suffix), then forward under that id.
+  const resolved = resolveModelId(payload.model)
+  if (resolved !== payload.model) {
+    consola.info(
+      `[Responses] Model resolved: "${payload.model}" -> "${resolved}"`,
     )
-    if (mapped) {
-      consola.info(
-        `[Responses] Model mapping: "${originalModel}" -> "${model}"`,
-      )
-      payload = { ...payload, model }
-    }
+    payload = { ...payload, model: resolved }
   }
   consola.info(`[Responses] Using model: "${payload.model}"`)
 
-  // Endpoint routing: if the target model natively accepts /responses (e.g.
-  // gpt-5.3-codex, gpt-5.5, gpt-5.4 — which are /responses-only and 400 on
-  // /chat/completions), pass the request straight through with no translation in
-  // either direction. Otherwise fall through to the translate-down path below,
-  // which keeps Codex -> Claude (and other /chat/completions models) working.
-  if (modelSupportsEndpoint(payload.model, "/responses")) {
+  // Pick the egress endpoint from the live catalog for the Codex (/responses)
+  // inbound: prefer native /responses passthrough (lossless), else translate down
+  // to /chat/completions. "unsupported" means the model advertises neither.
+  const egress = pickEgress("responses", payload.model)
+  if (egress === "/responses") {
     return handleResponsesPassthrough(c, payload)
+  }
+  if (egress === "unsupported") {
+    return c.json(
+      {
+        error: {
+          message: `Model "${payload.model}" is not reachable via /v1/responses or /chat/completions.`,
+          type: "invalid_request_error",
+          code: "unsupported_api_for_model",
+        },
+      },
+      400,
+    )
   }
 
   const traceTimestamp = await traceRequest({
@@ -163,6 +172,10 @@ async function handleResponsesPassthrough(
   consola.debug("Streaming passthrough response from Copilot")
   return streamSSE(c, async (stream) => {
     const streamTracer = new StreamTracer(traceTimestamp)
+    // Copilot tags each event of one output item with a different item id, which
+    // crashes clients that key streaming state by item id (Vercel AI SDK "part
+    // not found"). Stabilize to one anchor id per output_index before forwarding.
+    const normalizer = new StreamItemIdNormalizer()
 
     for await (const rawEvent of response) {
       consola.debug("Copilot raw responses event:", JSON.stringify(rawEvent))
@@ -170,10 +183,12 @@ async function handleResponsesPassthrough(
       if (!rawEvent.data) continue
 
       streamTracer.addChunk(rawEvent)
-      // Forward the native Responses SSE frame unchanged.
+      const fixed = normalizer.normalize(
+        JSON.parse(rawEvent.data) as ResponseStreamEvent,
+      )
       await stream.writeSSE({
         event: rawEvent.event,
-        data: rawEvent.data,
+        data: JSON.stringify(fixed),
       })
     }
 
