@@ -147,6 +147,9 @@ export function buildClaudeArgs(options: RunClaudeOptions): Array<string> {
     outputFormat,
     "--allow-dangerously-skip-permissions",
   ]
+  // CC requires --verbose alongside --print --output-format=stream-json
+  // (otherwise it exits 1 with "requires --verbose"). Verified against v2.1.183.
+  if (outputFormat === "stream-json") args.push("--verbose")
   if (options.agentsJson) args.push("--agents", options.agentsJson)
   if (options.mcpConfig) {
     const configs =

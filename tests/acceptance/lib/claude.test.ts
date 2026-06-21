@@ -28,6 +28,20 @@ describe("buildClaudeArgs", () => {
     expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json")
   })
 
+  test("stream-json adds --verbose (CC requires it with --print)", () => {
+    const args = buildClaudeArgs({
+      prompt: "p",
+      model: "m",
+      outputFormat: "stream-json",
+    })
+    expect(args).toContain("--verbose")
+  })
+
+  test("text format does NOT add --verbose", () => {
+    const args = buildClaudeArgs({ prompt: "p", model: "m" })
+    expect(args).not.toContain("--verbose")
+  })
+
   test("supports multiple --mcp-config arguments", () => {
     const args = buildClaudeArgs({
       prompt: "p",
