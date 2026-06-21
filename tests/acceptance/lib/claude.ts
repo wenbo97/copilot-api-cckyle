@@ -10,6 +10,10 @@
  * The CLI is invoked with `--allow-dangerously-skip-permissions` so it never blocks
  * on an interactive permission prompt in CI.
  */
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
 import { ACCEPTANCE_PORT } from "./proxy"
 
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -31,6 +35,8 @@ export interface RunClaudeOptions {
   outputFormat?: ClaudeOutputFormat
   /** Base URL of the proxy (default http://localhost:4143). */
   baseUrl?: string
+  /** Path to a --settings JSON file (overrides user-global settings). */
+  settingsPath?: string
   /** Kill the run after this many ms (default 120s). */
   timeoutMs?: number
   /** Extra raw CLI args appended verbatim (escape hatch for one-off rows). */
@@ -150,6 +156,10 @@ export function buildClaudeArgs(options: RunClaudeOptions): Array<string> {
   // CC requires --verbose alongside --print --output-format=stream-json
   // (otherwise it exits 1 with "requires --verbose"). Verified against v2.1.183.
   if (outputFormat === "stream-json") args.push("--verbose")
+  // Pin settings to our temp file so the user-global ~/.claude/settings.json
+  // (which sets ANTHROPIC_BASE_URL=:4141) cannot override our :4143 target. A
+  // settings.json env block otherwise wins over inherited process env.
+  if (options.settingsPath) args.push("--settings", options.settingsPath)
   if (options.agentsJson) args.push("--agents", options.agentsJson)
   if (options.mcpConfig) {
     const configs =
@@ -171,7 +181,23 @@ export async function runClaude(
   const baseUrl = options.baseUrl ?? `http://localhost:${ACCEPTANCE_PORT}`
   const outputFormat = options.outputFormat ?? "text"
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const args = buildClaudeArgs({ ...options, outputFormat })
+
+  // Write a temp --settings file pinning the proxy base URL. Claude Code applies
+  // a settings.json `env` block OVER inherited process env, so the user-global
+  // ~/.claude/settings.json (ANTHROPIC_BASE_URL=:4141) would otherwise hijack the
+  // run back to the live proxy. An explicit --settings file takes precedence.
+  const settingsDir = mkdtempSync(join(tmpdir(), "accept-cc-settings-"))
+  const settingsPath = join(settingsDir, "settings.json")
+  writeFileSync(
+    settingsPath,
+    JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: baseUrl,
+        ANTHROPIC_AUTH_TOKEN: "dummy",
+      },
+    }),
+  )
+  const args = buildClaudeArgs({ ...options, outputFormat, settingsPath })
 
   const proc = Bun.spawn([bin, ...args], {
     cwd: process.cwd(),
@@ -216,5 +242,6 @@ export async function runClaude(
     }
   } finally {
     if (timer) clearTimeout(timer)
+    rmSync(settingsDir, { recursive: true, force: true })
   }
 }
