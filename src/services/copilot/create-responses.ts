@@ -19,6 +19,8 @@ export const createResponses = async (payload: ResponsesPayload) => {
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
+  const body = sanitizeReasoningItems(payload)
+
   const extraHeaders: Record<string, string> = {
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
@@ -26,7 +28,7 @@ export const createResponses = async (payload: ResponsesPayload) => {
 
   const response = await copilotFetch("/responses", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
     extraHeaders,
   })
 
@@ -35,6 +37,25 @@ export const createResponses = async (payload: ResponsesPayload) => {
   }
 
   return (await response.json()) as ResponseObject
+}
+
+// Apply sanitizeReasoningItem to every reasoning item in the input so multi-turn
+// replay preserves encrypted_content and never forwards a null status. Returns
+// the payload unchanged when input is a bare string or carries no reasoning items.
+function sanitizeReasoningItems(payload: ResponsesPayload): ResponsesPayload {
+  if (typeof payload.input === "string") return payload
+  if (!payload.input.some((item) => isReasoningItem(item))) return payload
+
+  const input = payload.input.map((item) =>
+    isReasoningItem(item) ?
+      sanitizeReasoningItem(item as unknown as ReasoningItem)
+    : item,
+  )
+  return { ...payload, input: input as ResponsesPayload["input"] }
+}
+
+function isReasoningItem(item: unknown): boolean {
+  return (item as { type?: string }).type === "reasoning"
 }
 
 // The wire shape of `input` items is looser than the strict request union

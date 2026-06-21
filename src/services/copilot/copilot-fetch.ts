@@ -40,7 +40,10 @@ export async function copilotFetch(
     }
     const retryResponse = await makeRequest()
     if (!retryResponse.ok) {
-      throw new HTTPError(`Failed request to ${path} after token refresh`, retryResponse)
+      throw new HTTPError(
+        `Failed request to ${path} after token refresh`,
+        retryResponse,
+      )
     }
     return retryResponse
   }
