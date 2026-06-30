@@ -14,6 +14,15 @@
         "mcr.microsoft.com/playwright/mcp"
       ],
       "enabled": true
+    },
+    "codegraph": {
+      "type": "local",
+      "command": [
+        "codegraph",
+        "serve",
+        "--mcp"
+      ],
+      "enabled": true
     }
   },
   "$schema": "https://opencode.ai/config.json"

@@ -21,6 +21,9 @@ interface ModelSupports {
   tool_calls?: boolean
   parallel_tool_calls?: boolean
   dimensions?: boolean
+  // Per-model reasoning levels (e.g. ["none","low","medium","high","xhigh","max"]).
+  // Differs per model; used to clamp thinking/effort to what the model accepts.
+  reasoning_effort?: Array<string>
 }
 
 interface ModelCapabilities {
@@ -45,4 +48,8 @@ export interface Model {
     state: string
     terms: string
   }
+  // Egress endpoints the model accepts, e.g. ["/responses", "ws:/responses"] or
+  // ["/v1/messages", "/chat/completions"]. Some models (gpt-5.3-codex, gpt-5.5) are
+  // /responses-only and 400 on /chat/completions; the endpoint router reads this.
+  supported_endpoints?: Array<string>
 }

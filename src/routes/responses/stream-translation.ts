@@ -75,8 +75,11 @@ function emitTextDelta(
         part: { type: "output_text", text: "", annotations: [] },
       },
     )
+    state.messageItemOpen = true
     markOutputItem(state)
   }
+
+  state.textContent = (state.textContent ?? "") + delta.content
 
   events.push({
     type: "response.output_text.delta",
@@ -111,6 +114,7 @@ function emitToolCallDeltas(
         callId,
         name: tc.function.name,
         outputItemIndex: state.outputItemIndex,
+        arguments: "",
       }
 
       const fcItem: ResponseOutputFunctionCall = {
@@ -132,6 +136,7 @@ function emitToolCallDeltas(
     if (tc.function?.arguments) {
       const info = state.toolCalls[tc.index]
       // info is guaranteed to exist when arguments are present
+      info.arguments += tc.function.arguments
       events.push({
         type: "response.function_call_arguments.delta",
         output_index: info.outputItemIndex,
@@ -152,31 +157,59 @@ function emitFinish(
   const { choice, chunk, state } = ctx
   if (!choice.finish_reason) return
 
-  // Close any open text content
-  if (state.outputItemIndex >= 0 && Object.keys(state.toolCalls).length === 0) {
+  // Close the assistant text item (only if one was actually opened). Emitting
+  // these frames when no text streamed would reference a part that never opened.
+  if (state.messageItemOpen) {
+    const text = state.textContent ?? ""
     events.push(
       {
         type: "response.output_text.done",
         output_index: 0,
         content_index: 0,
-        text: "", // full text not tracked in streaming
+        text,
       },
       {
         type: "response.content_part.done",
         output_index: 0,
         content_index: 0,
-        part: { type: "output_text", text: "", annotations: [] },
+        part: { type: "output_text", text, annotations: [] },
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "message",
+          id: `msg_${state.responseId}`,
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text, annotations: [] }],
+        },
       },
     )
   }
 
-  // Close function call arguments if any
+  // Close each function call: its accumulated arguments, then the item itself so
+  // strict Responses clients can finalize the function_call output item.
   for (const info of Object.values(state.toolCalls)) {
-    events.push({
-      type: "response.function_call_arguments.done",
-      output_index: info.outputItemIndex,
-      arguments: "",
-    })
+    events.push(
+      {
+        type: "response.function_call_arguments.done",
+        output_index: info.outputItemIndex,
+        arguments: info.arguments,
+      },
+      {
+        type: "response.output_item.done",
+        output_index: info.outputItemIndex,
+        item: {
+          type: "function_call",
+          id: info.id,
+          call_id: info.callId,
+          name: info.name,
+          arguments: info.arguments,
+          status: "completed",
+        },
+      },
+    )
   }
 
   // Done items + completed
