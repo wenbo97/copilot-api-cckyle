@@ -18,6 +18,11 @@ import type {
   ResponsesPayload,
 } from "./responses-types"
 
+import {
+  isEncryptedPart,
+  UNREADABLE_PAYLOAD_MARKER,
+} from "../_shared/encrypted-content"
+
 // --- Request translation: Responses API → Chat Completions ---
 
 export function translateToOpenAI(
@@ -156,9 +161,17 @@ function translateContent(
       continue
     }
 
+    if (isEncryptedPart(part)) {
+      // Unreadable by any provider we egress to (Codex mints it with its own
+      // key). Marked rather than deleted so the model sees "a message existed,
+      // body unavailable" instead of an empty payload it reads as "nothing said".
+      parts.push({ type: "text", text: UNREADABLE_PAYLOAD_MARKER })
+      continue
+    }
+
     // `input_text` / `output_text`, plus any unknown part that happens to carry
-    // text, become a text block. Parts with no text at all (`encrypted_content`)
-    // are dropped — litellm's transform does exactly this.
+    // text, become a text block. Anything else has no representation here and is
+    // dropped — litellm's transform does exactly this.
     if (typeof part.text === "string")
       parts.push({ type: "text", text: part.text })
   }

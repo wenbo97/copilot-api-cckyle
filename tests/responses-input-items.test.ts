@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test"
 
 import type { ResponsesPayload } from "../src/routes/responses/responses-types"
 
+import { UNREADABLE_PAYLOAD_MARKER } from "../src/routes/_shared/encrypted-content"
 import { translateToOpenAI } from "../src/routes/responses/non-stream-translation"
 
 // Codex replays input items that Chat Completions cannot express. Verified
@@ -54,7 +55,7 @@ describe("translateToOpenAI: items Chat Completions cannot express", () => {
     expect(out.messages[0].role).toBe("user")
   })
 
-  test("drops an encrypted_content part rather than shaping it into an image", () => {
+  test("marks an encrypted_content part rather than shaping it into an image", () => {
     const out = translateToOpenAI({
       model: "gpt-4o",
       input: [
@@ -70,6 +71,7 @@ describe("translateToOpenAI: items Chat Completions cannot express", () => {
 
     expect(out.messages[0].content).toEqual([
       { type: "text", text: "envelope" },
+      { type: "text", text: UNREADABLE_PAYLOAD_MARKER },
     ])
   })
 

@@ -3,6 +3,7 @@ import { test, expect, mock, beforeEach, describe } from "bun:test"
 import type { ResponsesPayload } from "../src/routes/responses/responses-types"
 
 import { state } from "../src/lib/state"
+import { UNREADABLE_PAYLOAD_MARKER } from "../src/routes/_shared/encrypted-content"
 import {
   createResponses,
   sanitizeReasoningItem,
@@ -162,7 +163,7 @@ describe("stripEncryptedContentParts", () => {
     ],
   }
 
-  test("drops the encrypted part but keeps the item and its other fields", () => {
+  test("replaces the encrypted part with a marker, keeping the item's other fields", () => {
     const out = stripEncryptedContentParts({
       model: "gpt-5.6-sol",
       input: [agentMessage],
@@ -171,12 +172,13 @@ describe("stripEncryptedContentParts", () => {
     const [item] = out.input as unknown as Array<Record<string, unknown>>
     expect(item.content).toEqual([
       { type: "input_text", text: "Message Type: MESSAGE\nPayload:\n" },
+      { type: "input_text", text: UNREADABLE_PAYLOAD_MARKER },
     ])
     expect(item.type).toBe("agent_message")
     expect(item.author).toBe("/root/command_skills")
   })
 
-  test("drops an item whose only content part was the ciphertext", () => {
+  test("keeps an item whose only part was ciphertext, as a lone marker", () => {
     const out = stripEncryptedContentParts({
       model: "gpt-5.6-sol",
       input: [
@@ -185,7 +187,35 @@ describe("stripEncryptedContentParts", () => {
       ],
     } as unknown as ResponsesPayload)
 
-    expect(out.input).toEqual([{ role: "user", content: "hi" }])
+    const items = out.input as unknown as Array<Record<string, unknown>>
+    expect(items[0].content).toEqual([
+      { type: "input_text", text: UNREADABLE_PAYLOAD_MARKER },
+    ])
+    expect(items[1]).toEqual({ role: "user", content: "hi" })
+  })
+
+  // An assistant-role item may only carry `output_text`; an `input_text` marker
+  // inside one is exactly the shape the backend 400s on.
+  test("uses output_text for the marker when the item's own text parts do", () => {
+    const out = stripEncryptedContentParts({
+      model: "gpt-5.6-sol",
+      input: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "prior turn" },
+            { type: "encrypted_content", encrypted_content: "gAAAA" },
+          ],
+        },
+      ],
+    } as unknown as ResponsesPayload)
+
+    const [item] = out.input as unknown as Array<Record<string, unknown>>
+    expect(item.content).toEqual([
+      { type: "output_text", text: "prior turn" },
+      { type: "output_text", text: UNREADABLE_PAYLOAD_MARKER },
+    ])
   })
 
   test("leaves the top-level encrypted_content FIELD on reasoning items alone", () => {

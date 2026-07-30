@@ -6,6 +6,12 @@ import type {
   ResponsesPayload,
 } from "~/routes/responses/responses-types"
 
+import {
+  hasEncryptedContentPart,
+  isEncryptedPart,
+  UNREADABLE_PAYLOAD_MARKER,
+} from "~/routes/_shared/encrypted-content"
+
 import { copilotFetch } from "./copilot-fetch"
 
 /**
@@ -60,7 +66,7 @@ function isReasoningItem(item: unknown): boolean {
 }
 
 /**
- * Drop `encrypted_content` CONTENT PARTS from the input items.
+ * Replace `encrypted_content` CONTENT PARTS with a short marker.
  *
  * Codex's sub-agent turns (skills, multi-agent) replay as `agent_message` items
  * whose real payload sits in a content part of type `encrypted_content` — a
@@ -69,8 +75,12 @@ function isReasoningItem(item: unknown): boolean {
  * bare `response.failed` (error: null, no usage, no output) which Codex surfaces
  * as "stream disconnected before completion: response.failed event received".
  * Because such items stay in the conversation forever, one sub-agent turn bricks
- * every later turn of the session. The blob is unreadable to the backend either
- * way, so dropping it loses nothing and restores the session.
+ * every later turn of the session.
+ *
+ * The blob is unreadable to the backend either way, so nothing is lost by not
+ * forwarding it. We substitute a marker rather than deleting the part outright
+ * so the model sees "a message was sent, its body is unavailable" instead of an
+ * empty `Payload:` that reads as "the sub-agent said nothing".
  *
  * Only CONTENT PARTS are touched. The top-level `encrypted_content` FIELD on
  * `reasoning` items is a different mechanism that the backend mints and verifies
@@ -83,31 +93,28 @@ export function stripEncryptedContentParts(
   if (!payload.input.some((item) => hasEncryptedContentPart(item)))
     return payload
 
-  const input = payload.input.flatMap((item) => {
-    if (!hasEncryptedContentPart(item)) return [item]
+  const input = payload.input.map((item) => {
+    if (!hasEncryptedContentPart(item)) return item
 
     const record = item as unknown as Record<string, unknown>
-    const kept = (record.content as Array<unknown>).filter(
-      (part) => (part as { type?: string }).type !== "encrypted_content",
+    const parts = record.content as Array<unknown>
+    // An assistant-role item must use `output_text`; everything else uses
+    // `input_text`. Mirror whichever the item's own text parts already use so
+    // the marker cannot become the one part the backend rejects.
+    const textType =
+      parts.some((p) => (p as { type?: string }).type === "output_text") ?
+        "output_text"
+      : "input_text"
+
+    const content = parts.map((part) =>
+      isEncryptedPart(part) ?
+        { type: textType, text: UNREADABLE_PAYLOAD_MARKER }
+      : part,
     )
-    // An item whose only payload was the ciphertext carries nothing readable,
-    // and forwarding it with an empty content array 400s.
-    return kept.length === 0 ?
-        []
-      : [{ ...record, content: kept } as unknown as ResponseInputItem]
+    return { ...record, content } as unknown as ResponseInputItem
   })
 
   return { ...payload, input: input as ResponsesPayload["input"] }
-}
-
-function hasEncryptedContentPart(item: unknown): boolean {
-  const content = (item as { content?: unknown }).content
-  return (
-    Array.isArray(content)
-    && content.some(
-      (part) => (part as { type?: string }).type === "encrypted_content",
-    )
-  )
 }
 
 // The wire shape of `input` items is looser than the strict request union
