@@ -1,6 +1,7 @@
 import { events } from "fetch-event-stream"
 
 import type {
+  ResponseInputItem,
   ResponseObject,
   ResponsesPayload,
 } from "~/routes/responses/responses-types"
@@ -19,7 +20,7 @@ export const createResponses = async (payload: ResponsesPayload) => {
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
-  const body = sanitizeReasoningItems(payload)
+  const body = sanitizeReasoningItems(stripEncryptedContentParts(payload))
 
   const extraHeaders: Record<string, string> = {
     "X-Initiator": isAgentCall ? "agent" : "user",
@@ -56,6 +57,57 @@ function sanitizeReasoningItems(payload: ResponsesPayload): ResponsesPayload {
 
 function isReasoningItem(item: unknown): boolean {
   return (item as { type?: string }).type === "reasoning"
+}
+
+/**
+ * Drop `encrypted_content` CONTENT PARTS from the input items.
+ *
+ * Codex's sub-agent turns (skills, multi-agent) replay as `agent_message` items
+ * whose real payload sits in a content part of type `encrypted_content` — a
+ * Fernet blob Codex mints locally. The Copilot backend accepts that part at
+ * schema level but cannot decrypt it, and then aborts the whole response with a
+ * bare `response.failed` (error: null, no usage, no output) which Codex surfaces
+ * as "stream disconnected before completion: response.failed event received".
+ * Because such items stay in the conversation forever, one sub-agent turn bricks
+ * every later turn of the session. The blob is unreadable to the backend either
+ * way, so dropping it loses nothing and restores the session.
+ *
+ * Only CONTENT PARTS are touched. The top-level `encrypted_content` FIELD on
+ * `reasoning` items is a different mechanism that the backend mints and verifies
+ * itself — it must round-trip untouched (see `sanitizeReasoningItem`).
+ */
+export function stripEncryptedContentParts(
+  payload: ResponsesPayload,
+): ResponsesPayload {
+  if (typeof payload.input === "string") return payload
+  if (!payload.input.some((item) => hasEncryptedContentPart(item)))
+    return payload
+
+  const input = payload.input.flatMap((item) => {
+    if (!hasEncryptedContentPart(item)) return [item]
+
+    const record = item as unknown as Record<string, unknown>
+    const kept = (record.content as Array<unknown>).filter(
+      (part) => (part as { type?: string }).type !== "encrypted_content",
+    )
+    // An item whose only payload was the ciphertext carries nothing readable,
+    // and forwarding it with an empty content array 400s.
+    return kept.length === 0 ?
+        []
+      : [{ ...record, content: kept } as unknown as ResponseInputItem]
+  })
+
+  return { ...payload, input: input as ResponsesPayload["input"] }
+}
+
+function hasEncryptedContentPart(item: unknown): boolean {
+  const content = (item as { content?: unknown }).content
+  return (
+    Array.isArray(content)
+    && content.some(
+      (part) => (part as { type?: string }).type === "encrypted_content",
+    )
+  )
 }
 
 // The wire shape of `input` items is looser than the strict request union

@@ -76,17 +76,42 @@ function translateInputToMessages(
           },
         ],
       })
-    } else {
+    } else if (hasContent(item)) {
       const msg = item
-      const role = msg.role === "developer" ? "system" : msg.role
+      // The wire shape is looser than the union: Codex's `agent_message` items
+      // (sub-agent / skill turns) carry no `role` at all. Emitting
+      // `role: undefined` makes backends reject the request ("One or more of the
+      // provided message roles is not valid"), so default to "user" — the same
+      // default litellm's transform applies (`role=... or "user"`).
+      const rawRole = (msg as { role?: string }).role
+      const role = rawRole === "developer" ? "system" : (rawRole ?? "user")
       messages.push({
         role: role as Message["role"],
         content: translateContent(msg.content),
       })
     }
+    // else: the item carries nothing Chat Completions can express — see hasContent.
   }
 
   return messages
+}
+
+/**
+ * Whether an input item has a `content` field to translate at all.
+ *
+ * Codex replays items that have none — notably `reasoning`, whose payload lives
+ * in `encrypted_content`/`summary`. Chat Completions has no slot for those, so
+ * they are skipped. litellm's Responses→Completions transform guards the same
+ * way (`if content is None: return []`).
+ *
+ * Without this guard the generic branch called `translateContent(undefined)` and
+ * the proxy answered 500 — "undefined is not an object (evaluating
+ * 'content.map')" — on every Codex request that carried reasoning history to a
+ * translate-down model.
+ */
+function hasContent(item: ResponseInputItem): boolean {
+  const content = (item as { content?: unknown }).content
+  return content !== undefined && content !== null
 }
 
 function isFunctionCallOutput(
@@ -106,18 +131,38 @@ function translateContent(
 ): string | Array<ContentPart> {
   if (typeof content === "string") return content
 
-  return content.map((part): ContentPart => {
-    if (part.type === "input_text" || part.type === "output_text") {
-      return { type: "text", text: part.text }
+  const parts: Array<ContentPart> = []
+  for (const rawPart of content) {
+    // The wire shape is looser than the declared union — Codex sends part types
+    // that are not in it (notably `encrypted_content`) — so probe the raw shape
+    // rather than trusting the narrowed type.
+    const part = rawPart as {
+      type?: string
+      text?: unknown
+      image_url?: string
+      detail?: "low" | "high" | "auto"
     }
-    return {
-      type: "image_url",
-      image_url: {
-        url: part.image_url,
-        detail: part.detail,
-      },
+
+    if (part.type === "input_image") {
+      // Named explicitly. This used to be the `else` fallback, so image input
+      // worked only by accident — and EVERY other part type was also shaped into
+      // an image_url. A Codex `encrypted_content` part became
+      // `image_url: { url: undefined }`, which the backend rejects outright,
+      // taking the whole request down with it.
+      parts.push({
+        type: "image_url",
+        image_url: { url: part.image_url ?? "", detail: part.detail },
+      })
+      continue
     }
-  })
+
+    // `input_text` / `output_text`, plus any unknown part that happens to carry
+    // text, become a text block. Parts with no text at all (`encrypted_content`)
+    // are dropped — litellm's transform does exactly this.
+    if (typeof part.text === "string")
+      parts.push({ type: "text", text: part.text })
+  }
+  return parts
 }
 
 function translateTools(
