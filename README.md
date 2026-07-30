@@ -96,12 +96,154 @@ MODEL_MAPPINGS="claude-opus-4-8:claude-opus-4.8,claude-opus-4-7:claude-opus-4.7-
 
 | Command | |
 | ------- | --- |
-| `bun run dev` | Watch-mode server |
-| `bun run lint` | ESLint (`@echristian/eslint-config`) — `bun run lint --fix` to autofix |
-| `bun test` | Run the test suite (`tests/*.test.ts`) |
+| `bun run dev` | Watch-mode server (`--account-type enterprise`, port 4141) |
+| `bun run lint` | ESLint (`@echristian/eslint-config`) |
+| `bun test` | Unit test suite |
 | `bun run typecheck` | `tsc` |
 
 See [`AGENTS.md`](/AGENTS.md) for code-style conventions.
+
+## Testing
+
+Three layers, cheapest first. Run 1 and 2 on every change; run 3 before
+declaring a routing or translation change complete.
+
+### 1. Unit tests — fast, offline
+
+No network, no proxy, no CLI. `fetch` is mocked.
+
+```sh
+bun test                                      # whole suite
+bun test tests/create-responses.test.ts       # one file
+bun test --test-name-pattern "encrypted"      # by test name
+```
+
+### 2. Static checks
+
+```sh
+bun run typecheck                                    # tsc, no emit
+bun run lint -- --fix src/foo.ts tests/foo.test.ts   # autofix specific files
+bun run lint:all                                     # whole repo — see caveat below
+```
+
+Note the `--` before flags you want to reach ESLint: `bun run lint` already
+expands to `eslint --cache`, so `bun run lint -- --fix <paths>` is the correct
+form. A `simple-git-hooks` pre-commit hook runs `lint-staged` on staged files
+automatically, so a commit will reformat what you are committing.
+
+> [!NOTE]
+> **`lint:all` does not pass on a fresh Windows checkout**, and that is expected —
+> nothing is actually broken. This repo has `core.autocrlf=true` and no
+> `.gitattributes`, so Git stores LF but checks files out as CRLF, while the
+> Prettier config expects LF: one `prettier/prettier` "Delete `␍`" error per
+> line, ~10k repo-wide. Committed content and diffs are unaffected, and the
+> pre-commit hook only lints *staged* files, so day-to-day work is unaffected
+> too. Lint the files you changed rather than the whole repo.
+>
+> If you do want `lint:all` to pass, the zero-churn fix is one line in
+> `eslint.config.js`. It keeps the CRLF working tree and just tells Prettier to
+> accept each file's existing endings (verified: takes an untouched file from
+> 434 errors to 0):
+>
+> ```js
+> export default config({
+>   prettier: { plugins: ["prettier-plugin-packagejson"], endOfLine: "auto" },
+> })
+> ```
+>
+> The heavier alternative — a `.gitattributes` with `* text=auto eol=lf` plus a
+> re-checkout — converts the entire working tree to LF instead.
+
+### 3. Acceptance matrix — live, drives the real CLIs
+
+This is the only thing that may declare a routing change complete. It starts a
+**fresh proxy on `:4143` from the current worktree** (so it tests your edits,
+not the running server), drives the **real** `claude -p` and `codex exec`
+binaries against it, and judges each cell by a trace-tag oracle rather than by
+eyeballing replies.
+
+**Prerequisites**
+
+- `claude` and `codex` on `PATH` and already authenticated
+- A working Copilot token source (GitHub token or the VS Code bridge)
+- Port `4143` free
+- Network access to the Copilot backend
+
+```sh
+bun run tests/acceptance/run.ts                 # full matrix (24 cells, ~10 min)
+bun run tests/acceptance/run.ts --list          # print the cells, run nothing
+bun run tests/acceptance/run.ts --only 1a,1f    # subset by cell id
+bun run tests/acceptance/run.ts --mandate 1     # one mandate group
+```
+
+A cell passes only when **all** of these hold:
+
+1. the egress **trace tag** matches the expected one,
+2. the client process exits `0`,
+3. the final assistant text is non-empty,
+4. no `unsupported_api_for_model` or raw `400` appears in client output,
+5. any cell-specific extra assertions hold.
+
+Results are written to `tests/acceptance/RESULTS-<date>.md` (one row per cell:
+expected vs actual tag, exit code, PASS/FAIL, trace path). The runner exits
+non-zero if any cell fails.
+
+**Trace tags** — the `.type` field of each `<traceDir>/<ts>.req`, i.e. which
+egress leg the request actually took:
+
+| Tag | Inbound → egress |
+| --- | --- |
+| `anthropic-passthrough` | Claude Code → Copilot `/v1/messages`, no translation |
+| `anthropic-via-responses` | Claude Code → Copilot `/responses` |
+| `responses-passthrough` | Codex → Copilot `/responses`, no translation |
+| `responses` | Codex → Copilot `/chat/completions` (translate-down) |
+| `anthropic` / `chat` | Anthropic / OpenAI chat-completions legs |
+
+### 4. Soak — high-volume repeat of the matrix
+
+For each (model × client) combo, runs N live iterations cycling through client
+features, so the runs exercise different code paths instead of the same call N
+times. Writes `SOAK-RESULTS-<date>.md`.
+
+```sh
+bun run tests/acceptance/soak.ts                    # all combos, 50 runs each
+bun run tests/acceptance/soak.ts --runs 10          # smoke
+bun run tests/acceptance/soak.ts --only claude:gpt-5.5
+```
+
+### Port conventions
+
+The harness deliberately never touches a port you may be using interactively:
+
+| Port | Use |
+| ---- | --- |
+| `4141` | Your live proxy (`start-copilot-api.cmd` / `bun run dev`) |
+| `4142` | Scratch instance for manual probing |
+| `4143` | Reserved for the acceptance harness — started and stopped by it |
+
+### Manual probing with traces
+
+To inspect exactly what goes on the wire, run a second instance with tracing and
+verbose logging, and leave `:4141` alone:
+
+```sh
+bun run ./src/main.ts start --account-type enterprise \
+  --port 4142 --trace --trace-folder ./traces-dbg --verbose
+```
+
+Each request writes `<ts>.req` and `<ts>.resp` into the trace folder. `--verbose`
+additionally logs every raw upstream stream event, which is how you tell a
+proxy-side fault from an upstream rejection.
+
+### Reproducing a client-side bug
+
+When a real Codex session misbehaves, replay its history instead of guessing.
+Codex stores every session as JSONL under
+`~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl`; the `response_item`
+records are exactly the Responses API `input` array. Collect them, POST them to
+`:4142/v1/responses`, and bisect by removing item kinds until the failure
+disappears. That turns "the client is broken" into a red/green loop in seconds.
+
 
 ---
 
