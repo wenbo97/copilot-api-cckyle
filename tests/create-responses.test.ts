@@ -6,6 +6,7 @@ import { state } from "../src/lib/state"
 import {
   createResponses,
   sanitizeReasoningItem,
+  stripEncryptedContentParts,
 } from "../src/services/copilot/create-responses"
 
 // Mock state so copilotFetch's ensureCopilotToken() short-circuits (valid,
@@ -139,5 +140,87 @@ describe("sanitizeReasoningItem (litellm port)", () => {
       status: "completed",
     })
     expect("encrypted_content" in cleaned).toBe(false)
+  })
+})
+
+// Regression: a Codex sub-agent (skill) turn replays as an `agent_message` item
+// carrying an `encrypted_content` content part. Copilot accepts it at schema
+// level, fails to decrypt it, and kills the response with a bare
+// `response.failed` (error: null) — Codex reports "stream disconnected before
+// completion". Verified against the live backend: the same request goes green
+// once the part is removed, and red again with a 3-byte ciphertext, so it is the
+// part TYPE that is fatal, not its size.
+describe("stripEncryptedContentParts", () => {
+  const agentMessage = {
+    type: "agent_message",
+    id: "amsg_1",
+    author: "/root/command_skills",
+    recipient: "/root",
+    content: [
+      { type: "input_text", text: "Message Type: MESSAGE\nPayload:\n" },
+      { type: "encrypted_content", encrypted_content: "gAAAAABqar7I..." },
+    ],
+  }
+
+  test("drops the encrypted part but keeps the item and its other fields", () => {
+    const out = stripEncryptedContentParts({
+      model: "gpt-5.6-sol",
+      input: [agentMessage],
+    } as unknown as ResponsesPayload)
+
+    const [item] = out.input as unknown as Array<Record<string, unknown>>
+    expect(item.content).toEqual([
+      { type: "input_text", text: "Message Type: MESSAGE\nPayload:\n" },
+    ])
+    expect(item.type).toBe("agent_message")
+    expect(item.author).toBe("/root/command_skills")
+  })
+
+  test("drops an item whose only content part was the ciphertext", () => {
+    const out = stripEncryptedContentParts({
+      model: "gpt-5.6-sol",
+      input: [
+        { ...agentMessage, content: [agentMessage.content[1]] },
+        { role: "user", content: "hi" },
+      ],
+    } as unknown as ResponsesPayload)
+
+    expect(out.input).toEqual([{ role: "user", content: "hi" }])
+  })
+
+  test("leaves the top-level encrypted_content FIELD on reasoning items alone", () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "r",
+      encrypted_content: "COPILOT_BLOB",
+      summary: [],
+    }
+    const out = stripEncryptedContentParts({
+      model: "gpt-5.6-sol",
+      input: [reasoning],
+    } as unknown as ResponsesPayload)
+
+    expect(out.input).toEqual([
+      reasoning,
+    ] as unknown as ResponsesPayload["input"])
+  })
+
+  test("returns the payload untouched when no encrypted part is present", () => {
+    const payload = {
+      model: "gpt-5.6-sol",
+      input: [{ role: "user", content: "hi" }],
+    } as unknown as ResponsesPayload
+
+    expect(stripEncryptedContentParts(payload)).toBe(payload)
+  })
+
+  test("createResponses never puts an encrypted_content part on the wire", async () => {
+    await createResponses({
+      model: "gpt-5.6-sol",
+      input: [agentMessage, { role: "user", content: "hi" }],
+    } as unknown as ResponsesPayload)
+
+    const [, opts] = callArgs()
+    expect(opts.body).not.toContain("encrypted_content")
   })
 })
