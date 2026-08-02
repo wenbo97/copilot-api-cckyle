@@ -24,6 +24,12 @@ interface ModelSupports {
   // Per-model reasoning levels (e.g. ["none","low","medium","high","xhigh","max"]).
   // Differs per model; used to clamp thinking/effort to what the model accepts.
   reasoning_effort?: Array<string>
+  // Whether the model accepts `thinking: {type:"adaptive"}` — the ONLY thinking
+  // shape the Copilot backend takes (it rejects Anthropic's `type:"enabled"`).
+  // False/absent for e.g. claude-haiku-4.5, which advertises no effort set either.
+  adaptive_thinking?: boolean
+  min_thinking_budget?: number
+  max_thinking_budget?: number
 }
 
 interface ModelCapabilities {

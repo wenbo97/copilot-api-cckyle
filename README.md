@@ -211,6 +211,45 @@ bun run tests/acceptance/soak.ts --runs 10          # smoke
 bun run tests/acceptance/soak.ts --only claude:gpt-5.5
 ```
 
+### 5. Direct-connect probe — is this proxy still needed?
+
+Answers one question: can Claude Code point `ANTHROPIC_BASE_URL` straight at the
+Copilot backend and drop this proxy? It sends **Claude Code's own wire format**
+(its minimal headers, its `thinking` schema, its model ids, a raw `gh auth token`
+as the bearer) to the real backend and reports what the backend accepts. Every
+gating check that FAILs is a job this proxy is currently doing for you.
+
+```sh
+bun run probe:direct                                    # default: opus-5, sonnet-5, haiku-4.5
+bun run probe:direct -- --models claude-opus-5          # subset
+bun run probe:direct -- --account-type individual       # non-enterprise base url
+bun run probe:direct -- --catalog-only                  # GET checks only, spends nothing
+bun run probe:direct -- --json                          # machine-readable
+```
+
+Exit `0` = direct connect viable · `1` = proxy still required · `2` = probe
+could not run (no token / network). It costs a handful of tiny live completions;
+`--catalog-only` costs nothing but cannot clear the thinking gate, so it reports
+INCONCLUSIVE rather than a pass.
+
+**Result as of 2026-07-31 (enterprise)** — `bun run probe:direct` exits 1:
+
+| Check | Result |
+| ----- | ------ |
+| `auth` | PASS — the backend accepts a raw GitHub token directly; no Copilot-token exchange needed |
+| `catalog` / `native-messages` | PASS for `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4.5` (opus/sonnet already 1M ctx natively) |
+| `plain-completion` | PASS |
+| **`thinking-standard`** | **FAIL 400** — `"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort"` |
+| `thinking-adaptive` | PASS — the shape [`adaptThinkingForCopilot`](/src/services/copilot/create-messages.ts) rewrites to |
+| `model-suffix-1m` | FAIL — `claude-opus-5[1m]` is rejected; direct configs must keep `ANTHROPIC_DEFAULT_*_MODEL` suffix-free |
+
+So direct connect is **not** viable today: Claude Code always sends
+`thinking:{type:"enabled",budget_tokens:N}` (confirmed in `traces/`), which the
+backend rejects. That one rewrite is the proxy's load-bearing job for Claude
+models; model aliasing, `/responses` routing, Codex support, and tracing are the
+rest. Re-run the probe after any backend change — when it exits 0, direct
+connect has become an option for Claude Code + Claude models.
+
 ### Port conventions
 
 The harness deliberately never touches a port you may be using interactively:
