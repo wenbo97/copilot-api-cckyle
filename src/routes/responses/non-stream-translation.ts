@@ -15,6 +15,7 @@ import type {
   ResponseOutputFunctionCall,
   ResponseOutputItem,
   ResponseOutputMessage,
+  ResponseTextFormat,
   ResponsesPayload,
 } from "./responses-types"
 
@@ -36,9 +37,36 @@ export function translateToOpenAI(
     stream: payload.stream,
     temperature: payload.temperature,
     top_p: payload.top_p,
+    frequency_penalty: payload.frequency_penalty,
+    presence_penalty: payload.presence_penalty,
     max_tokens: payload.max_output_tokens,
     tools: translateTools(payload.tools),
     tool_choice: translateToolChoice(payload.tool_choice),
+    parallel_tool_calls: payload.parallel_tool_calls,
+    reasoning_effort: payload.reasoning?.effort,
+    response_format: translateTextFormat(payload.text?.format),
+    stream_options: payload.stream_options,
+    prompt_cache_key: payload.prompt_cache_key,
+    prompt_cache_retention: payload.prompt_cache_retention,
+    safety_identifier: payload.safety_identifier,
+    service_tier: payload.service_tier,
+    user: payload.user,
+  }
+}
+
+function translateTextFormat(
+  format: ResponseTextFormat | null | undefined,
+): ChatCompletionsPayload["response_format"] {
+  if (!format || format.type === "text") return undefined
+  if (format.type === "json_object") return { type: "json_object" }
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: format.name,
+      description: format.description,
+      schema: format.schema,
+      strict: format.strict,
+    },
   }
 }
 
@@ -207,6 +235,7 @@ function translateTools(
             string,
             unknown
           >,
+          strict: t.strict as boolean | undefined,
         },
       })
       continue
@@ -228,17 +257,89 @@ function translateToolChoice(
 
 export function translateToResponses(
   response: ChatCompletionResponse,
+  metadata?: Record<string, string>,
 ): ResponseObject {
-  const output: Array<ResponseOutputItem> = []
-  const choice = response.choices[0]
+  const choice = response.choices.at(0)
+  if (!choice) return missingChoiceResponse(response, metadata)
 
-  // Text content → message output item
+  const terminal = classifyFinishReason(choice.finish_reason)
+
+  return {
+    id: response.id,
+    object: "response",
+    created_at: response.created,
+    model: response.model,
+    status: terminal.status,
+    output: translateChoiceOutput(response.id, choice, terminal.itemStatus),
+    metadata,
+    incomplete_details: terminal.incompleteDetails,
+    usage: translateUsage(response),
+    error: terminal.error,
+  }
+}
+
+type OutputItemStatus = ResponseOutputMessage["status"]
+
+interface FinishClassification {
+  error: ResponseObject["error"]
+  incompleteDetails: ResponseObject["incomplete_details"]
+  itemStatus: OutputItemStatus
+  status: ResponseObject["status"]
+}
+
+function classifyFinishReason(reason: unknown): FinishClassification {
+  switch (reason) {
+    case "stop":
+    case "tool_calls": {
+      return {
+        error: null,
+        incompleteDetails: null,
+        itemStatus: "completed",
+        status: "completed",
+      }
+    }
+    case "length":
+    case "content_filter": {
+      return {
+        error: null,
+        incompleteDetails: {
+          reason:
+            reason === "content_filter" ? "content_filter" : (
+              "max_output_tokens"
+            ),
+        },
+        itemStatus: "incomplete",
+        status: "incomplete",
+      }
+    }
+    default: {
+      return {
+        error: {
+          code: "invalid_upstream_response",
+          type: "server_error",
+          message: `Unknown upstream finish reason "${String(reason)}".`,
+          param: null,
+        },
+        incompleteDetails: null,
+        itemStatus: "incomplete",
+        status: "failed",
+      }
+    }
+  }
+}
+
+function translateChoiceOutput(
+  responseId: string,
+  choice: ChatCompletionResponse["choices"][number],
+  status: OutputItemStatus,
+): Array<ResponseOutputItem> {
+  const output: Array<ResponseOutputItem> = []
   if (choice.message.content) {
-    const msg: ResponseOutputMessage = {
+    output.push({
       type: "message",
-      id: `msg_${response.id}`,
+      id: `msg_${responseId}`,
       role: "assistant",
-      status: "completed",
+      status,
       content: [
         {
           type: "output_text",
@@ -246,35 +347,50 @@ export function translateToResponses(
           annotations: [],
         },
       ],
-    }
-    output.push(msg)
+    })
   }
 
-  // Tool calls → function_call output items
-  for (const tc of choice.message.tool_calls ?? []) {
-    const fc: ResponseOutputFunctionCall = {
+  for (const toolCall of choice.message.tool_calls ?? []) {
+    const item: ResponseOutputFunctionCall = {
       type: "function_call",
-      id: `fc_${tc.id}`,
-      call_id: tc.id,
-      name: tc.function.name,
-      arguments: tc.function.arguments,
-      status: "completed",
+      id: `fc_${toolCall.id}`,
+      call_id: toolCall.id,
+      name: toolCall.function.name,
+      arguments: toolCall.function.arguments,
+      status,
     }
-    output.push(fc)
+    output.push(item)
   }
+  return output
+}
 
+function missingChoiceResponse(
+  response: ChatCompletionResponse,
+  metadata?: Record<string, string>,
+): ResponseObject {
   return {
     id: response.id,
     object: "response",
     created_at: response.created,
     model: response.model,
-    status: "completed",
-    output,
-    usage: {
-      input_tokens: response.usage?.prompt_tokens ?? 0,
-      output_tokens: response.usage?.completion_tokens ?? 0,
-      total_tokens: response.usage?.total_tokens ?? 0,
+    status: "failed",
+    output: [],
+    metadata,
+    incomplete_details: null,
+    usage: translateUsage(response),
+    error: {
+      code: "invalid_upstream_response",
+      type: "server_error",
+      message: "Upstream Chat Completions response contained no choices.",
+      param: null,
     },
-    error: null,
+  }
+}
+
+function translateUsage(response: ChatCompletionResponse) {
+  return {
+    input_tokens: response.usage?.prompt_tokens ?? 0,
+    output_tokens: response.usage?.completion_tokens ?? 0,
+    total_tokens: response.usage?.total_tokens ?? 0,
   }
 }

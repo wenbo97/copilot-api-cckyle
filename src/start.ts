@@ -40,7 +40,20 @@ interface RunServerOptions {
   traceFolder?: string
 }
 
-// eslint-disable-next-line max-lines-per-function -- startup orchestration is inherently sequential
+export function createListenOptions(
+  port: number,
+  idleTimeout: number,
+): Parameters<typeof serve>[0] {
+  return {
+    fetch: server.fetch as ServerHandler,
+    hostname: "127.0.0.1",
+    port,
+    bun: {
+      idleTimeout,
+    },
+  }
+}
+
 export async function runServer(options: RunServerOptions): Promise<void> {
   if (options.proxyEnv) {
     initProxyFromEnv()
@@ -163,14 +176,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
       Number.parseInt(process.env.IDLE_TIMEOUT, 10)
     : 255
 
-  serve({
-    fetch: server.fetch as ServerHandler,
-    port: options.port,
-    // Pass idleTimeout through the bun-specific options
-    bun: {
-      idleTimeout,
-    },
-  })
+  serve(createListenOptions(options.port, idleTimeout))
 }
 
 export const start = defineCommand({

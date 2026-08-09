@@ -15,26 +15,26 @@ export async function copilotFetch(
     method?: string
     body?: string
     extraHeaders?: Record<string, string>
+    signal?: AbortSignal
+    headerTimeoutMs?: number
   } = {},
 ): Promise<Response> {
   await ensureCopilotToken()
+  options.signal?.throwIfAborted()
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const makeRequest = () =>
-    fetch(`${copilotBaseUrl(state)}${path}`, {
-      method: options.method ?? "GET",
-      headers: {
-        ...copilotHeaders(state),
-        ...options.extraHeaders,
-      },
-      ...(options.body ? { body: options.body } : {}),
-    })
+  const makeRequest = () => fetchWithHeaderTimeout(path, options)
 
   const response = await makeRequest()
 
   if (response.status === 401) {
     consola.warn(`Got 401 from ${path}, refreshing Copilot token and retrying`)
+    await response.body?.cancel()
     await ensureCopilotToken(true)
+    // Token refresh is deliberately process-scoped and is not tied to one
+    // client's signal. Check cancellation only after refresh, before retrying
+    // this request.
+    options.signal?.throwIfAborted()
     if (!state.copilotToken) {
       throw new HTTPError("Copilot token refresh failed", response)
     }
@@ -53,4 +53,50 @@ export async function copilotFetch(
   }
 
   return response
+}
+
+async function fetchWithHeaderTimeout(
+  path: string,
+  options: {
+    method?: string
+    body?: string
+    extraHeaders?: Record<string, string>
+    signal?: AbortSignal
+    headerTimeoutMs?: number
+  },
+): Promise<Response> {
+  const timeoutMs = options.headerTimeoutMs
+  const timeoutController = new AbortController()
+  const timeout =
+    timeoutMs === undefined ? undefined : (
+      setTimeout(() => {
+        timeoutController.abort(
+          new DOMException(
+            `Copilot response header timeout after ${timeoutMs} ms`,
+            "TimeoutError",
+          ),
+        )
+      }, timeoutMs)
+    )
+
+  const signal =
+    options.signal ?
+      AbortSignal.any([options.signal, timeoutController.signal])
+    : timeoutController.signal
+
+  try {
+    return await fetch(`${copilotBaseUrl(state)}${path}`, {
+      method: options.method ?? "GET",
+      headers: {
+        ...copilotHeaders(state),
+        ...options.extraHeaders,
+      },
+      ...(options.body ? { body: options.body } : {}),
+      signal,
+    })
+  } finally {
+    // The header deadline must not become a body/stream deadline after fetch()
+    // has resolved with response headers.
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
 }

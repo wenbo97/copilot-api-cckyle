@@ -1,5 +1,4 @@
 import consola from "consola"
-import { events } from "fetch-event-stream"
 
 import type {
   ReasoningEffort,
@@ -15,7 +14,10 @@ import {
 } from "~/routes/_shared/encrypted-content"
 import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
 
+import type { CopilotRequestOptions } from "./create-chat-completions"
+
 import { copilotFetch } from "./copilot-fetch"
+import { CopilotStreamLifecycle } from "./stream-lifecycle"
 
 /**
  * Native `POST /responses` egress to the Copilot backend.
@@ -25,7 +27,10 @@ import { copilotFetch } from "./copilot-fetch"
  * Codex `/v1/responses` handler to pass requests straight through for
  * `/responses`-native models (gpt-5.3-codex, gpt-5.5, gpt-5.4) with no translation.
  */
-export const createResponses = async (payload: ResponsesPayload) => {
+export const createResponses = async (
+  payload: ResponsesPayload,
+  options: CopilotRequestOptions = {},
+) => {
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
@@ -40,17 +45,27 @@ export const createResponses = async (payload: ResponsesPayload) => {
   }
   if (enableVision) extraHeaders["copilot-vision-request"] = "true"
 
-  const response = await copilotFetch("/responses", {
-    method: "POST",
-    body: JSON.stringify(body),
-    extraHeaders,
-  })
+  const streamLifecycle =
+    payload.stream ?
+      new CopilotStreamLifecycle(options.signal, options.streamTimeouts)
+    : undefined
 
-  if (payload.stream) {
-    return events(response)
+  try {
+    const response = await copilotFetch("/responses", {
+      method: "POST",
+      body: JSON.stringify(body),
+      extraHeaders,
+      signal: streamLifecycle?.signal ?? options.signal,
+      headerTimeoutMs: options.headerTimeoutMs,
+    })
+
+    if (streamLifecycle) return streamLifecycle.iterate(response)
+
+    return (await response.json()) as ResponseObject
+  } catch (error) {
+    streamLifecycle?.dispose(error)
+    throw error
   }
-
-  return (await response.json()) as ResponseObject
 }
 
 function normalizeReasoningEffort(payload: ResponsesPayload): ResponsesPayload {

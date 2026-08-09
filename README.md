@@ -46,7 +46,13 @@ bun run start   # production
 bun run auth    # GitHub auth only
 ```
 
-See the [upstream README](https://github.com/ericc-ch/copilot-api#readme) for npx, Docker, and the full CLI option tables — they apply unchanged.
+See the [upstream README](https://github.com/ericc-ch/copilot-api#readme) for npx and the full CLI option tables. Docker/network publishing instructions do **not** apply to this fork's default server boundary.
+
+### Local-only server boundary
+
+The server binds explicitly to `127.0.0.1`. It is intentionally unavailable to other machines, Docker port publishing, and reverse proxies. The `/token` management endpoint additionally rejects browser requests carrying an `Origin` header, accepts only a loopback `Host`, disables caching with `Cache-Control: no-store`, and does not opt into CORS.
+
+If remote or container access is required later, add a separate authenticated management boundary instead of exposing `/token` through the public API listener.
 
 ## Token sources
 
@@ -77,6 +83,10 @@ Copy `.env.example` to `.env`. Fork-relevant keys:
 | `MODEL_MAPPINGS` | Rewrite model IDs, `source:target` comma-separated (e.g. `claude-opus-4-8:claude-opus-4.8`). | none |
 | `VSCODE_PROXY_PORT` | Port of the Copilot Token Bridge VS Code extension. | `18774` |
 | `IDLE_TIMEOUT` | Bun server idle timeout (seconds). | `255` |
+| `COPILOT_HEADER_TIMEOUT_MS` | Responses request deadline for receiving upstream headers; `0` disables it. | `60000` |
+| `COPILOT_FIRST_EVENT_TIMEOUT_MS` | Optional Responses first upstream SSE event deadline; `0` disables it. | disabled |
+| `COPILOT_STREAM_IDLE_TIMEOUT_MS` | Optional Responses upstream SSE inactivity deadline; all SSE activity resets it. | disabled |
+| `COPILOT_TOTAL_TIMEOUT_MS` | Optional total Responses upstream stream deadline. | disabled |
 | `TRACE_OUTPUT_FOLDER` | Where request/response traces go when `--trace` is set. | `./traces` |
 
 `MODEL_MAPPINGS` example (maps the IDs Claude Code sends to internal Copilot model names):

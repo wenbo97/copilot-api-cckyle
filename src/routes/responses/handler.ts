@@ -11,25 +11,33 @@ import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
 import {
   createChatCompletions,
-  type ChatCompletionChunk,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import { createResponses } from "~/services/copilot/create-responses"
+import {
+  readCopilotHeaderTimeoutMs,
+  readCopilotStreamTimeouts,
+} from "~/services/copilot/stream-lifecycle"
 
 import type { ResponseObject } from "./responses-types"
-import type {
-  ResponsesPayload,
-  ResponseStreamState,
-  ResponseStreamEvent,
-} from "./responses-types"
+import type { ResponsesPayload, ResponseStreamState } from "./responses-types"
 
 import { isKnownReasoningEffort } from "../_shared/reasoning-policy"
 import { StreamItemIdNormalizer } from "../_shared/stream-item-id"
+import { validateResponsesFallback } from "./fallback-capabilities"
 import {
   translateToOpenAI,
   translateToResponses,
 } from "./non-stream-translation"
-import { translateChunkToResponseEvents } from "./stream-translation"
+import {
+  NativeResponsesStreamTracker,
+  parseChatCompletionSseData,
+  parseNativeResponsesSseData,
+} from "./stream-protocol"
+import {
+  translateChunkToResponseEvents,
+  translateStreamFailureToResponseEvents,
+} from "./stream-translation"
 
 export async function handleResponses(c: Context) {
   await checkRateLimit(state)
@@ -74,6 +82,13 @@ export async function handleResponses(c: Context) {
     )
   }
 
+  return handleResponsesFallback(c, payload)
+}
+
+async function handleResponsesFallback(c: Context, payload: ResponsesPayload) {
+  const fallbackError = validateResponsesFallback(payload)
+  if (fallbackError) return c.json({ error: fallbackError }, 400)
+
   const traceTimestamp = await traceRequest({
     type: "responses",
     original: payload,
@@ -87,14 +102,18 @@ export async function handleResponses(c: Context) {
 
   if (state.manualApprove) await awaitApproval()
 
-  const response = await createChatCompletions(openAIPayload)
+  const response = await createChatCompletions(openAIPayload, {
+    signal: c.req.raw.signal,
+    headerTimeoutMs: readCopilotHeaderTimeoutMs(),
+    streamTimeouts: readCopilotStreamTimeouts(),
+  })
 
   if (isNonStreaming(response)) {
     consola.debug(
       "Non-streaming response from Copilot:",
       JSON.stringify(response).slice(-400),
     )
-    const responsesResponse = translateToResponses(response)
+    const responsesResponse = translateToResponses(response, payload.metadata)
     await traceResponse(
       { type: "responses", openai: response, translated: responsesResponse },
       traceTimestamp,
@@ -104,6 +123,20 @@ export async function handleResponses(c: Context) {
 
   // Streaming — Responses API uses plain SSE with `type` field in data, not `event:` field
   consola.debug("Streaming response from Copilot")
+  return streamChatFallback(c, { payload, response, traceTimestamp })
+}
+
+interface ChatFallbackStreamContext {
+  payload: ResponsesPayload
+  response: Exclude<
+    Awaited<ReturnType<typeof createChatCompletions>>,
+    ChatCompletionResponse
+  >
+  traceTimestamp: string | null
+}
+
+function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
+  const { payload, response, traceTimestamp } = context
   return streamSSE(c, async (stream) => {
     const streamState: ResponseStreamState = {
       responseId: "",
@@ -111,30 +144,61 @@ export async function handleResponses(c: Context) {
       outputItemIndex: 0,
       contentPartIndex: 0,
       messageStarted: false,
+      metadata: payload.metadata,
       toolCalls: {},
     }
 
     const streamTracer = new StreamTracer(traceTimestamp)
+    let endedWithDone = false
 
-    for await (const rawEvent of response) {
-      consola.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
-      if (rawEvent.data === "[DONE]") break
-      if (!rawEvent.data) continue
+    try {
+      for await (const rawEvent of response) {
+        if (c.req.raw.signal.aborted) break
+        consola.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
+        if (rawEvent.data === "[DONE]") {
+          endedWithDone = true
+          break
+        }
+        if (!rawEvent.data) continue
 
-      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-      const events = translateChunkToResponseEvents(chunk, streamState)
+        const chunk = parseChatCompletionSseData(rawEvent.data)
+        const translatedEvents = translateChunkToResponseEvents(
+          chunk,
+          streamState,
+        )
 
-      for (const event of events) {
-        consola.debug("Translated Responses event:", JSON.stringify(event))
-        streamTracer.addChunk({ openai: chunk, responses: event })
-        await stream.writeSSE({
-          event: event.type,
-          data: JSON.stringify(event),
-        })
+        for (const event of translatedEvents) {
+          consola.debug("Translated Responses event:", JSON.stringify(event))
+          streamTracer.addChunk({ openai: chunk, responses: event })
+          await stream.writeSSE({
+            event: event.type,
+            data: JSON.stringify(event),
+          })
+        }
+
+        if (streamState.terminalEmitted) break
       }
-    }
 
-    await streamTracer.finish()
+      if (!c.req.raw.signal.aborted && !streamState.terminalEmitted) {
+        const message =
+          endedWithDone ?
+            "Upstream Chat Completions sent [DONE] before a finish_reason."
+          : "Upstream Chat Completions stream ended before a finish_reason."
+        await writeSyntheticFailure(
+          { state: streamState, stream, tracer: streamTracer },
+          message,
+        )
+      }
+    } catch (error) {
+      if (!c.req.raw.signal.aborted && !streamState.terminalEmitted) {
+        await writeSyntheticFailure(
+          { state: streamState, stream, tracer: streamTracer },
+          describeStreamError("Upstream Chat Completions stream failed", error),
+        ).catch(() => undefined)
+      }
+    } finally {
+      await streamTracer.finish()
+    }
   })
 }
 
@@ -181,7 +245,11 @@ async function handleResponsesPassthrough(
 
   if (state.manualApprove) await awaitApproval()
 
-  const response = await createResponses(payload)
+  const response = await createResponses(payload, {
+    signal: c.req.raw.signal,
+    headerTimeoutMs: readCopilotHeaderTimeoutMs(),
+    streamTimeouts: readCopilotStreamTimeouts(),
+  })
 
   if (isResponsesNonStreaming(response)) {
     consola.debug(
@@ -202,26 +270,98 @@ async function handleResponsesPassthrough(
     // crashes clients that key streaming state by item id (Vercel AI SDK "part
     // not found"). Stabilize to one anchor id per output_index before forwarding.
     const normalizer = new StreamItemIdNormalizer()
+    const tracker = new NativeResponsesStreamTracker()
+    let endedWithDone = false
 
-    for await (const rawEvent of response) {
-      consola.debug("Copilot raw responses event:", JSON.stringify(rawEvent))
-      if (rawEvent.data === "[DONE]") break
-      if (!rawEvent.data) continue
+    try {
+      for await (const rawEvent of response) {
+        if (c.req.raw.signal.aborted) break
+        consola.debug("Copilot raw responses event:", JSON.stringify(rawEvent))
+        if (rawEvent.data === "[DONE]") {
+          endedWithDone = true
+          break
+        }
+        if (!rawEvent.data) continue
 
-      streamTracer.addChunk(rawEvent)
-      const fixed = normalizer.normalize(
-        JSON.parse(rawEvent.data) as ResponseStreamEvent,
-      )
-      await stream.writeSSE({
-        event: rawEvent.event,
-        data: JSON.stringify(fixed),
-      })
+        const fixed = normalizer.normalize(
+          parseNativeResponsesSseData(rawEvent.data),
+        )
+        tracker.observe(fixed)
+        streamTracer.addChunk(fixed)
+        await stream.writeSSE({
+          event: fixed.type,
+          data: JSON.stringify(fixed),
+        })
+
+        if (tracker.terminalSeen) break
+      }
+
+      if (!c.req.raw.signal.aborted && !tracker.terminalSeen) {
+        const message =
+          endedWithDone ?
+            "Upstream Responses stream sent [DONE] before a terminal event."
+          : "Upstream Responses stream ended before a terminal event."
+        await writeNativeFailure(
+          { stream, tracer: streamTracer, tracker },
+          message,
+        )
+      }
+    } catch (error) {
+      if (!c.req.raw.signal.aborted && !tracker.terminalSeen) {
+        await writeNativeFailure(
+          { stream, tracer: streamTracer, tracker },
+          describeStreamError("Upstream Responses stream failed", error),
+        ).catch(() => undefined)
+      }
+    } finally {
+      await streamTracer.finish()
     }
-
-    await streamTracer.finish()
   })
 }
 
 const isResponsesNonStreaming = (
   response: Awaited<ReturnType<typeof createResponses>>,
 ): response is ResponseObject => Object.hasOwn(response, "output")
+
+type SseWriter = {
+  writeSSE(input: { event?: string; data: string }): Promise<unknown>
+}
+
+interface SyntheticFailureContext {
+  state: ResponseStreamState
+  stream: SseWriter
+  tracer: StreamTracer
+}
+
+async function writeSyntheticFailure(
+  context: SyntheticFailureContext,
+  message: string,
+): Promise<void> {
+  const { state, stream, tracer } = context
+  for (const event of translateStreamFailureToResponseEvents(message, state)) {
+    tracer.addChunk({ responses: event })
+    await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
+  }
+}
+
+interface NativeFailureContext {
+  stream: SseWriter
+  tracer: StreamTracer
+  tracker: NativeResponsesStreamTracker
+}
+
+async function writeNativeFailure(
+  context: NativeFailureContext,
+  message: string,
+): Promise<void> {
+  const { stream, tracer, tracker } = context
+  for (const event of tracker.fail(message)) {
+    tracer.addChunk(event)
+    await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
+  }
+}
+
+function describeStreamError(prefix: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return `${prefix}: ${message}`
+}

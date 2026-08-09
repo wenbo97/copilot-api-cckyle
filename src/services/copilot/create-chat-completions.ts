@@ -1,9 +1,17 @@
-import { events } from "fetch-event-stream"
+import type { CopilotStreamTimeouts } from "./stream-lifecycle"
 
 import { copilotFetch } from "./copilot-fetch"
+import { CopilotStreamLifecycle } from "./stream-lifecycle"
+
+export interface CopilotRequestOptions {
+  signal?: AbortSignal
+  headerTimeoutMs?: number
+  streamTimeouts?: CopilotStreamTimeouts
+}
 
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
+  options: CopilotRequestOptions = {},
 ) => {
   const enableVision = payload.messages.some(
     (x) =>
@@ -20,24 +28,35 @@ export const createChatCompletions = async (
   }
   if (enableVision) extraHeaders["copilot-vision-request"] = "true"
 
-  const response = await copilotFetch("/chat/completions", {
-    method: "POST",
-    body: JSON.stringify(payload),
-    extraHeaders,
-  })
+  const streamLifecycle =
+    payload.stream ?
+      new CopilotStreamLifecycle(options.signal, options.streamTimeouts)
+    : undefined
 
-  if (payload.stream) {
-    return events(response)
+  try {
+    const response = await copilotFetch("/chat/completions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      extraHeaders,
+      signal: streamLifecycle?.signal ?? options.signal,
+      headerTimeoutMs: options.headerTimeoutMs,
+    })
+
+    if (streamLifecycle) return streamLifecycle.iterate(response)
+
+    return (await response.json()) as ChatCompletionResponse
+  } catch (error) {
+    streamLifecycle?.dispose(error)
+    throw error
   }
-
-  return (await response.json()) as ChatCompletionResponse
 }
 
 // Streaming types
 
 export interface ChatCompletionChunk {
   id: string
-  object: "chat.completion.chunk"
+  // Copilot's Chat SSE omits `object` even though OpenAI includes it.
+  object?: "chat.completion.chunk"
   created: number
   model: string
   choices: Array<Choice>
@@ -73,7 +92,9 @@ interface Delta {
 interface Choice {
   index: number
   delta: Delta
-  finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null
+  // Copilot omits this field on non-terminal chunks and supplies it only on the
+  // final choice frame.
+  finish_reason?: "stop" | "length" | "tool_calls" | "content_filter" | null
   logprobs: object | null
 }
 
@@ -125,9 +146,27 @@ export interface ChatCompletionsPayload {
   presence_penalty?: number | null
   logit_bias?: Record<string, number> | null
   logprobs?: boolean | null
-  response_format?: { type: "json_object" } | null
+  top_logprobs?: number | null
+  response_format?:
+    | { type: "text" }
+    | { type: "json_object" }
+    | {
+        type: "json_schema"
+        json_schema: {
+          name: string
+          description?: string
+          schema: Record<string, unknown>
+          strict?: boolean
+        }
+      }
+    | null
   seed?: number | null
   tools?: Array<Tool> | null
+  parallel_tool_calls?: boolean | null
+  stream_options?: {
+    include_obfuscation?: boolean
+    include_usage?: boolean
+  } | null
   tool_choice?:
     | "none"
     | "auto"
@@ -135,7 +174,26 @@ export interface ChatCompletionsPayload {
     | { type: "function"; function: { name: string } }
     | null
   user?: string | null
-  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null
+  prompt_cache_key?: string | null
+  prompt_cache_retention?: "in_memory" | "24h" | null
+  safety_identifier?: string | null
+  service_tier?:
+    | "auto"
+    | "default"
+    | "flex"
+    | "scale"
+    | "priority"
+    | "fast"
+    | null
+  reasoning_effort?:
+    | "none"
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | "max"
+    | "ultra"
+    | null
 }
 
 export interface Tool {
@@ -144,6 +202,7 @@ export interface Tool {
     name: string
     description?: string
     parameters: Record<string, unknown>
+    strict?: boolean
   }
 }
 

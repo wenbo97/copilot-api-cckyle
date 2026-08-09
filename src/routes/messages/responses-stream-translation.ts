@@ -106,7 +106,7 @@ export function translateResponsesEventToAnthropicEvents(
     case "error": {
       events.push({
         type: "error",
-        error: { type: event.error.type, message: event.error.message },
+        error: { type: "api_error", message: event.message },
       })
       break
     }

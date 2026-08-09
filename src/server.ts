@@ -13,6 +13,11 @@ import { usageRoute } from "./routes/usage/route"
 export const server = new Hono()
 
 server.use(logger())
+
+// Keep the local token-management endpoint outside the browser-facing CORS
+// middleware. The route itself rejects requests carrying an Origin header.
+server.route("/token", tokenRoute)
+
 server.use(cors())
 
 server.get("/", (c) => c.text("Server running"))
@@ -21,7 +26,6 @@ server.route("/chat/completions", completionRoutes)
 server.route("/models", modelRoutes)
 server.route("/embeddings", embeddingRoutes)
 server.route("/usage", usageRoute)
-server.route("/token", tokenRoute)
 
 // Compatibility with tools that expect v1/ prefix
 server.route("/v1/chat/completions", completionRoutes)
