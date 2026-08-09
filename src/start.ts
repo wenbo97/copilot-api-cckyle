@@ -7,7 +7,10 @@ import path from "node:path"
 import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
-import { validateModelMappings } from "./lib/model-identity"
+import {
+  validateModelMappings,
+  validateRequiredResponsesModels,
+} from "./lib/model-identity"
 import { getModelMappings } from "./lib/model-mapping"
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
@@ -91,6 +94,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   // Warn early if any MODEL_MAPPINGS target is absent from the loaded catalog.
   validateModelMappings()
+  validateRequiredResponsesModels()
 
   consola.info(
     `Available models: \n${state.models?.data.map((model) => `- ${model.id}`).join("\n")}`,

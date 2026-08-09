@@ -5,7 +5,24 @@ import { state } from "~/lib/state"
 // Effort ordering, weakest to strongest (moved from endpoint-router.ts). The
 // catalog advertises a per-model subset of these in
 // `capabilities.supports.reasoning_effort`.
-const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh", "max"] as const
+const EFFORT_ORDER = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const
+
+export function isKnownReasoningEffort(
+  effort: unknown,
+): effort is (typeof EFFORT_ORDER)[number] {
+  return (
+    typeof effort === "string"
+    && EFFORT_ORDER.includes(effort as (typeof EFFORT_ORDER)[number])
+  )
+}
 
 // Budget→effort thresholds (named for clarity; values preserved from the original
 // mapThinkingToReasoningEffort in non-stream-translation.ts).

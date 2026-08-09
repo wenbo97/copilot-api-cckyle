@@ -5,6 +5,15 @@ import { state } from "./state"
 
 const SUFFIX = /\[[^\]]*\]$/ // trailing [1m] etc.
 
+export const REQUIRED_RESPONSES_MODELS = [
+  "gpt-5.3-codex",
+  "gpt-5.4-mini",
+  "gpt-5.5",
+  "gpt-5.6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+] as const
+
 function inCatalog(id: string): boolean {
   return Boolean(state.models?.data.some((m) => m.id === id))
 }
@@ -40,4 +49,15 @@ export function validateModelMappings(): Array<string> {
     consola.warn(`MODEL_MAPPINGS targets not in catalog: ${bad.join(", ")}`)
   }
   return bad
+}
+
+/** Startup check for the Responses-native model set this proxy guarantees. */
+export function validateRequiredResponsesModels(): Array<string> {
+  const missing = REQUIRED_RESPONSES_MODELS.filter((id) => !inCatalog(id))
+  if (missing.length > 0) {
+    consola.warn(
+      `Required Responses models missing from live catalog: ${missing.join(", ")}`,
+    )
+  }
+  return missing
 }

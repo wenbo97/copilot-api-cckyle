@@ -5,6 +5,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import {
   resolveModelId,
   validateModelMappings,
+  validateRequiredResponsesModels,
 } from "../src/lib/model-identity"
 import { clearModelMappingsCache } from "../src/lib/model-mapping"
 import { state } from "../src/lib/state"
@@ -54,5 +55,18 @@ describe("validateModelMappings", () => {
     state.models = catalog
     process.env.MODEL_MAPPINGS = "a:claude-opus-4.8,b:ghost-model"
     expect(validateModelMappings()).toEqual(["ghost-model"])
+  })
+})
+
+describe("validateRequiredResponsesModels", () => {
+  test("reports required models missing from the live catalog", () => {
+    state.models = catalog
+    expect(validateRequiredResponsesModels()).toEqual([
+      "gpt-5.3-codex",
+      "gpt-5.4-mini",
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+    ])
   })
 })

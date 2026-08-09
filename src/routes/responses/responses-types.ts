@@ -10,6 +10,7 @@ export type ReasoningEffort =
   | "high"
   | "xhigh"
   | "max"
+  | "ultra"
 
 export interface ResponsesPayload {
   model: string
@@ -68,12 +69,21 @@ export type ResponseInputContentPart =
 
 // --- Tool types ---
 
-export interface ResponseTool {
+export type ResponseTool = ResponseFunctionTool | ResponseNamespaceTool
+
+export interface ResponseFunctionTool {
   type: "function"
   name: string
   description?: string
   parameters: Record<string, unknown>
   strict?: boolean
+}
+
+export interface ResponseNamespaceTool {
+  type: "namespace"
+  name: string
+  description: string
+  tools: Array<ResponseFunctionTool>
 }
 
 // --- Response types (non-streaming) ---

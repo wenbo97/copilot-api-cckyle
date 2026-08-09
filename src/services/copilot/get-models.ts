@@ -15,11 +15,19 @@ interface ModelLimits {
   max_output_tokens?: number
   max_prompt_tokens?: number
   max_inputs?: number
+  vision?: {
+    max_prompt_image_size?: number
+    max_prompt_images?: number
+    supported_media_types?: Array<string>
+  }
 }
 
 interface ModelSupports {
   tool_calls?: boolean
   parallel_tool_calls?: boolean
+  streaming?: boolean
+  structured_outputs?: boolean
+  vision?: boolean
   dimensions?: boolean
   // Per-model reasoning levels (e.g. ["none","low","medium","high","xhigh","max"]).
   // Differs per model; used to clamp thinking/effort to what the model accepts.

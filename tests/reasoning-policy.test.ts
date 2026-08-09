@@ -99,6 +99,29 @@ describe("clampReasoningEffort (preserved behavior)", () => {
     } as unknown as ModelsResponse
     expect(clampReasoningEffort("claude-opus-4.8", "max")).toBe("max")
   })
+  test("treats ultra as the max tier when the catalog tops out at max", () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-sol",
+          capabilities: {
+            supports: {
+              reasoning_effort: [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+              ],
+            },
+          },
+        },
+      ],
+    } as unknown as ModelsResponse
+    expect(clampReasoningEffort("gpt-5.6-sol", "ultra")).toBe("max")
+  })
   test("a mid-range allowed level passes through unchanged", () => {
     state.models = {
       object: "list",

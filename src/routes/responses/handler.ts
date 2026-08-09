@@ -23,6 +23,7 @@ import type {
   ResponseStreamEvent,
 } from "./responses-types"
 
+import { isKnownReasoningEffort } from "../_shared/reasoning-policy"
 import { StreamItemIdNormalizer } from "../_shared/stream-item-id"
 import {
   translateToOpenAI,
@@ -49,6 +50,9 @@ export async function handleResponses(c: Context) {
     payload = { ...payload, model: resolved }
   }
   consola.info(`[Responses] Using model: "${payload.model}"`)
+
+  const effortError = rejectUnknownReasoningEffort(c, payload)
+  if (effortError) return effortError
 
   // Pick the egress endpoint from the live catalog for the Codex (/responses)
   // inbound: prefer native /responses passthrough (lossless), else translate down
@@ -132,6 +136,28 @@ export async function handleResponses(c: Context) {
 
     await streamTracer.finish()
   })
+}
+
+function rejectUnknownReasoningEffort(
+  c: Context,
+  payload: ResponsesPayload,
+): Response | undefined {
+  const requested = (payload.reasoning as { effort?: unknown } | undefined)
+    ?.effort
+  if (requested === undefined || isKnownReasoningEffort(requested)) return
+
+  const label =
+    typeof requested === "string" ? `"${requested}"` : JSON.stringify(requested)
+  return c.json(
+    {
+      error: {
+        message: `Unknown reasoning effort ${label}.`,
+        type: "invalid_request_error",
+        code: "invalid_reasoning_effort",
+      },
+    },
+    400,
+  )
 }
 
 const isNonStreaming = (

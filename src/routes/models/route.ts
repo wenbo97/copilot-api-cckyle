@@ -22,6 +22,7 @@ modelRoutes.get("/", async (c) => {
       owned_by: model.vendor,
       display_name: model.name,
       supported_endpoints: model.supported_endpoints,
+      capabilities: model.capabilities,
     }))
 
     return c.json({

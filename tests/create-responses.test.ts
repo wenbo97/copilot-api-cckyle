@@ -4,6 +4,7 @@ import type { ResponsesPayload } from "../src/routes/responses/responses-types"
 
 import { state } from "../src/lib/state"
 import { UNREADABLE_PAYLOAD_MARKER } from "../src/routes/_shared/encrypted-content"
+import { server } from "../src/server"
 import {
   createResponses,
   sanitizeReasoningItem,
@@ -30,6 +31,7 @@ const fetchMock = mock(
 
 beforeEach(() => {
   fetchMock.mockClear()
+  state.models = undefined
 })
 
 const callArgs = () =>
@@ -59,6 +61,315 @@ test("forwards the payload body unchanged", async () => {
   await createResponses(payload)
   const [, opts] = callArgs()
   expect(JSON.parse(opts.body)).toEqual(payload)
+})
+
+test("maps ultra to the catalog max tier before Responses egress", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "gpt-5.6-sol",
+        capabilities: {
+          supports: {
+            reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
+          },
+        },
+      },
+    ],
+  } as unknown as NonNullable<typeof state.models>
+
+  await createResponses({
+    model: "gpt-5.6-sol",
+    input: "hi",
+    reasoning: { effort: "ultra" },
+  } as unknown as ResponsesPayload)
+
+  const [, opts] = callArgs()
+  const body = JSON.parse(opts.body) as { reasoning: { effort: string } }
+  expect(body.reasoning.effort).toBe("max")
+})
+
+test("rejects an unknown Responses reasoning effort before Copilot egress", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "gpt-5.6-sol",
+        supported_endpoints: ["/responses"],
+        capabilities: {
+          supports: {
+            reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
+          },
+        },
+      },
+    ],
+  } as unknown as NonNullable<typeof state.models>
+
+  const response = await server.request("http://localhost/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.6-sol",
+      input: "hi",
+      reasoning: { effort: "ludicrous" },
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    error: {
+      message: 'Unknown reasoning effort "ludicrous".',
+      type: "invalid_request_error",
+      code: "invalid_reasoning_effort",
+    },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("exposes live model capabilities and limits from /v1/models", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      {
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        vendor: "OpenAI",
+        supported_endpoints: ["/responses", "ws:/responses"],
+        capabilities: {
+          family: "gpt-5.6-sol",
+          limits: {
+            max_context_window_tokens: 1_050_000,
+            max_output_tokens: 128_000,
+          },
+          object: "model_capabilities",
+          supports: {
+            tool_calls: true,
+            parallel_tool_calls: true,
+            reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
+            streaming: true,
+            structured_outputs: true,
+            vision: true,
+          },
+          tokenizer: "o200k_base",
+          type: "chat",
+        },
+      },
+    ],
+  } as unknown as NonNullable<typeof state.models>
+
+  const response = await server.request("http://localhost/v1/models")
+  const body = (await response.json()) as {
+    data: Array<Record<string, unknown>>
+  }
+
+  expect(response.status).toBe(200)
+  expect(body.data[0].capabilities).toEqual({
+    family: "gpt-5.6-sol",
+    limits: {
+      max_context_window_tokens: 1_050_000,
+      max_output_tokens: 128_000,
+    },
+    object: "model_capabilities",
+    supports: {
+      tool_calls: true,
+      parallel_tool_calls: true,
+      reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
+      streaming: true,
+      structured_outputs: true,
+      vision: true,
+    },
+    tokenizer: "o200k_base",
+    type: "chat",
+  })
+})
+
+test("fills an empty namespace description before Responses egress", async () => {
+  await createResponses({
+    model: "gpt-5.6-sol",
+    input: "hi",
+    tools: [
+      {
+        type: "namespace",
+        name: "workspace",
+        description: "",
+        tools: [
+          {
+            type: "function",
+            name: "search_code",
+            description: "Searches source code.",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      },
+    ],
+  })
+
+  const [, opts] = callArgs()
+  const body = JSON.parse(opts.body) as {
+    tools: Array<Record<string, unknown>>
+  }
+  expect(body.tools[0].description).toBe('Tools in the "workspace" namespace.')
+})
+
+test("leaves arbitrary agent_message tools unchanged", async () => {
+  await createResponses({
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "agent_message",
+        content: [{ type: "input_text", text: "hi" }],
+        tools: [
+          {
+            type: "function",
+            name: "search_code",
+            description: "",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      },
+    ],
+  } as unknown as ResponsesPayload)
+
+  const [, opts] = callArgs()
+  const body = JSON.parse(opts.body) as {
+    input: Array<{ tools: Array<Record<string, unknown>> }>
+  }
+  expect(body.input[0].tools[0].description).toBe("")
+})
+
+test("normalizes Codex additional_tools items before Responses egress", async () => {
+  await createResponses({
+    model: "gpt-5.6-sol",
+    input: [
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [
+          {
+            type: "namespace",
+            name: "functions",
+            description: "",
+            tools: [
+              {
+                type: "function",
+                name: "shell_command",
+                description: "",
+                parameters: { type: "object", properties: {} },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  } as unknown as ResponsesPayload)
+
+  const [, opts] = callArgs()
+  const body = JSON.parse(opts.body) as {
+    input: Array<{ tools: Array<Record<string, unknown>> }>
+  }
+  expect(body.input[0].tools[0].description).toBe(
+    'Tools in the "functions" namespace.',
+  )
+  const children = body.input[0].tools[0].tools as Array<
+    Record<string, unknown>
+  >
+  expect("description" in children[0]).toBe(false)
+})
+
+test("omits blank function descriptions before Responses egress", async () => {
+  await createResponses({
+    model: "gpt-5.6-sol",
+    input: "hi",
+    tools: [
+      {
+        type: "function",
+        name: "empty_description",
+        description: "",
+        parameters: { type: "object", properties: {} },
+      },
+      {
+        type: "function",
+        name: "whitespace_description",
+        description: "   ",
+        parameters: { type: "object", properties: {} },
+      },
+      {
+        type: "function",
+        name: "described",
+        description: "Reads a local file.",
+        parameters: { type: "object", properties: {} },
+      },
+    ],
+  })
+
+  const [, opts] = callArgs()
+  const body = JSON.parse(opts.body) as {
+    tools: Array<Record<string, unknown>>
+  }
+  expect("description" in body.tools[0]).toBe(false)
+  expect("description" in body.tools[1]).toBe(false)
+  expect(body.tools[2].description).toBe("Reads a local file.")
+})
+
+test("enables Copilot vision for image and PDF Responses input", async () => {
+  for (const part of [
+    { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+    {
+      type: "input_file",
+      filename: "sample.pdf",
+      file_data: "data:application/pdf;base64,AAAA",
+    },
+  ]) {
+    fetchMock.mockClear()
+    await createResponses({
+      model: "gpt-5.6-sol",
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: "Read the attachment." }, part],
+        },
+      ],
+    } as unknown as ResponsesPayload)
+
+    const [, opts] = callArgs()
+    expect(opts.headers["copilot-vision-request"]).toBe("true")
+  }
+})
+
+test("fills missing or blank namespace descriptions and normalizes children", async () => {
+  await createResponses({
+    model: "gpt-5.6-sol",
+    input: "hi",
+    tools: [
+      {
+        type: "namespace",
+        name: "workspace",
+        tools: [],
+      },
+      {
+        type: "namespace",
+        name: "",
+        description: "   ",
+        tools: [
+          {
+            type: "function",
+            name: "search_code",
+            description: "   ",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      },
+    ],
+  } as unknown as ResponsesPayload)
+
+  const [, opts] = callArgs()
+  const body = JSON.parse(opts.body) as {
+    tools: Array<Record<string, unknown>>
+  }
+  expect(body.tools[0].description).toBe('Tools in the "workspace" namespace.')
+  expect(body.tools[1].description).toBe("Tool namespace.")
+  const children = body.tools[1].tools as Array<Record<string, unknown>>
+  expect("description" in children[0]).toBe(false)
 })
 
 test("sets X-Initiator to user for a plain user request", async () => {

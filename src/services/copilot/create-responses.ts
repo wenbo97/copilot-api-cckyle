@@ -1,6 +1,8 @@
+import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import type {
+  ReasoningEffort,
   ResponseInputItem,
   ResponseObject,
   ResponsesPayload,
@@ -11,6 +13,7 @@ import {
   isEncryptedPart,
   UNREADABLE_PAYLOAD_MARKER,
 } from "~/routes/_shared/encrypted-content"
+import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
 
 import { copilotFetch } from "./copilot-fetch"
 
@@ -26,7 +29,11 @@ export const createResponses = async (payload: ResponsesPayload) => {
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
-  const body = sanitizeReasoningItems(stripEncryptedContentParts(payload))
+  const body = sanitizeReasoningItems(
+    stripEncryptedContentParts(
+      normalizeToolDescriptions(normalizeReasoningEffort(payload)),
+    ),
+  )
 
   const extraHeaders: Record<string, string> = {
     "X-Initiator": isAgentCall ? "agent" : "user",
@@ -44,6 +51,20 @@ export const createResponses = async (payload: ResponsesPayload) => {
   }
 
   return (await response.json()) as ResponseObject
+}
+
+function normalizeReasoningEffort(payload: ResponsesPayload): ResponsesPayload {
+  const requested = payload.reasoning?.effort
+  const normalized = clampReasoningEffort(payload.model, requested)
+  if (normalized === requested) return payload
+
+  consola.info(
+    `[Responses] Reasoning effort normalized for ${payload.model}: ${requested} -> ${normalized}`,
+  )
+  return {
+    ...payload,
+    reasoning: { ...payload.reasoning, effort: normalized as ReasoningEffort },
+  }
 }
 
 // Apply sanitizeReasoningItem to every reasoning item in the input so multi-turn
@@ -117,6 +138,93 @@ export function stripEncryptedContentParts(
   return { ...payload, input: input as ResponsesPayload["input"] }
 }
 
+/**
+ * Normalize tool descriptions before native `/responses` egress.
+ *
+ * Function descriptions are optional, so an explicit empty string is omitted.
+ * Namespace descriptions are required, so an empty value receives a stable
+ * fallback. Only protocol-defined tool containers are visited: top-level
+ * `tools`, Codex `additional_tools` input items, and namespace children.
+ * Arbitrary `tools` properties on other input items remain untouched.
+ */
+export function normalizeToolDescriptions(
+  payload: ResponsesPayload,
+): ResponsesPayload {
+  let normalizedPayload = payload
+  const topLevelTools: unknown = payload.tools
+  if (Array.isArray(topLevelTools)) {
+    const tools = topLevelTools.map((tool) => normalizeToolDefinition(tool))
+    if (!tools.every((tool, index) => tool === topLevelTools[index]))
+      normalizedPayload = {
+        ...normalizedPayload,
+        tools: tools as ResponsesPayload["tools"],
+      }
+  }
+
+  if (typeof payload.input === "string") return normalizedPayload
+
+  const input = payload.input.map((item) => {
+    const rawItem: unknown = item
+    if (!isRecord(rawItem) || rawItem.type !== "additional_tools") return item
+    const itemTools = rawItem.tools
+    if (!Array.isArray(itemTools)) return item
+
+    const tools = itemTools.map((tool) => normalizeToolDefinition(tool))
+    if (tools.every((tool, index) => tool === itemTools[index])) return item
+    return { ...rawItem, tools } as unknown as ResponseInputItem
+  })
+
+  if (input.every((item, index) => item === payload.input[index]))
+    return normalizedPayload
+  return {
+    ...normalizedPayload,
+    input: input as ResponsesPayload["input"],
+  }
+}
+
+function normalizeToolDefinition(tool: unknown): unknown {
+  if (!isRecord(tool)) return tool
+
+  if (tool.type === "namespace") {
+    const childTools = tool.tools
+    let normalized = tool
+    if (Array.isArray(childTools)) {
+      const tools = childTools.map((child) => normalizeToolDefinition(child))
+      if (!tools.every((child, index) => child === childTools[index]))
+        normalized = { ...normalized, tools }
+    }
+
+    const descriptionIsMissingOrBlank =
+      normalized.description === undefined
+      || (typeof normalized.description === "string"
+        && normalized.description.trim() === "")
+    if (!descriptionIsMissingOrBlank) return normalized
+
+    const name =
+      typeof normalized.name === "string" && normalized.name.trim() !== "" ?
+        normalized.name.trim()
+      : undefined
+    return {
+      ...normalized,
+      description:
+        name ? `Tools in the "${name}" namespace.` : "Tool namespace.",
+    }
+  }
+
+  if (
+    tool.type !== "function"
+    || typeof tool.description !== "string"
+    || tool.description.trim() !== ""
+  )
+    return tool
+  const { description: _description, ...withoutDescription } = tool
+  return withoutDescription
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 // The wire shape of `input` items is looser than the strict request union
 // (Codex echoes `function_call` items, images arrive as `input_image` parts),
 // so these heuristics probe the raw shape rather than the narrowed type.
@@ -127,9 +235,19 @@ function hasVisionContent(payload: ResponsesPayload): boolean {
     const content = (item as { content?: unknown }).content
     return (
       Array.isArray(content)
-      && content.some(
-        (part) => (part as { type?: string }).type === "input_image",
-      )
+      && content.some((part) => {
+        const record = part as {
+          type?: string
+          filename?: string
+          file_data?: string
+        }
+        if (record.type === "input_image") return true
+        if (record.type !== "input_file") return false
+        return (
+          record.file_data?.startsWith("data:application/pdf") === true
+          || record.filename?.toLowerCase().endsWith(".pdf") === true
+        )
+      })
     )
   })
 }
