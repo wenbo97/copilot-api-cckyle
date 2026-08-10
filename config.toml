@@ -1,0 +1,54 @@
+# Codex common configuration
+#
+# This repository-root file is a reusable template and is not auto-loaded.
+# Merge the complete template into the user config:
+#   C:\Users\Administrator\.codex\config.toml
+#
+# Trusted projects can also use <repo>\.codex\config.toml for project-scoped
+# overrides, but provider and authentication settings must remain user-level.
+#
+# Keep machine-specific settings (desktop, projects, plugins, MCP servers,
+# notification commands, runtime paths, and Windows sandboxing) in the user
+# config instead of this common template.
+
+# Balanced default for normal coding, debugging, and review work.
+# Reserve "max" for a separate profile used only on the hardest tasks.
+model = "gpt-5.6-sol"
+model_provider = "copilotproxy"
+model_reasoning_effort = "high"
+model_reasoning_summary = "concise"
+model_verbosity = "high"
+personality = "pragmatic"
+web_search = "indexed"
+
+[model_providers.copilotproxy]
+name = "Local Copilot Proxy"
+base_url = "http://127.0.0.1:4141/v1"
+# Setup this key match on your device system variables. Value can be any.
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+[features]
+memories = true
+
+[memories]
+generate_memories = true
+use_memories = true
+
+# Memory extraction and consolidation are background tasks. Seeing Terra
+# requests for these tasks in the Proxy log is expected and does not mean the
+# foreground Sol request was downgraded.
+extract_model = "gpt-5.6-terra"
+consolidation_model = "gpt-5.6-terra"
+max_rollouts_per_startup = 8
+min_rollout_idle_hours = 12
+min_rate_limit_remaining_percent = 40
+
+[agents]
+# Keep foreground work on Sol and use Terra for most auxiliary agents.
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "medium"
+
+# The primary thread is not counted in this limit, so 3 permits up to four
+# simultaneous model threads in one session.
+max_concurrent_threads_per_session = 3
