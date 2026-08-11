@@ -5,7 +5,7 @@ echo Start Copilot API Server at %~dp0
 echo ================================================
 echo.
 
-curl cip.cc
+@REM curl cip.cc
 
 ECHO Starting Copilot-Api service...
 
