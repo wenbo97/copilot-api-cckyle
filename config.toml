@@ -47,8 +47,25 @@ min_rate_limit_remaining_percent = 40
 [agents]
 # Keep foreground work on Sol and use Terra for most auxiliary agents.
 default_subagent_model = "gpt-5.6-terra"
-default_subagent_reasoning_effort = "high"
+default_subagent_reasoning_effort = "xhigh"
 
 # The primary thread is not counted in this limit, so 3 permits up to four
 # simultaneous model threads in one session.
 max_concurrent_threads_per_session = 3
+
+[mcp_servers.codegraph]
+command = "codegraph"
+args = ["serve", "--mcp"]
+enabled_tools = [
+    "codegraph_node",
+    "codegraph_search",
+    "codegraph_callers",
+    "codegraph_callees",
+    "codegraph_impact",
+    "codegraph_files",
+    "codegraph_status",
+]
+disabled_tools = ["codegraph_explore"]
+
+[mcp_servers.codegraph.env]
+CODEGRAPH_MCP_TOOLS = "node,search,callers,callees,impact,files,status"
