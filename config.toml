@@ -15,9 +15,9 @@
 # Reserve "max" for a separate profile used only on the hardest tasks.
 model = "gpt-5.6-sol"
 model_provider = "copilotproxy"
-model_reasoning_effort = "high"
+model_reasoning_effort = "xhigh"
 model_reasoning_summary = "concise"
-model_verbosity = "high"
+model_verbosity = "low"
 personality = "pragmatic"
 web_search = "indexed"
 
@@ -47,7 +47,7 @@ min_rate_limit_remaining_percent = 40
 [agents]
 # Keep foreground work on Sol and use Terra for most auxiliary agents.
 default_subagent_model = "gpt-5.6-terra"
-default_subagent_reasoning_effort = "medium"
+default_subagent_reasoning_effort = "high"
 
 # The primary thread is not counted in this limit, so 3 permits up to four
 # simultaneous model threads in one session.
