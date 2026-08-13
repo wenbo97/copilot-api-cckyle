@@ -3,6 +3,7 @@ import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { state } from "../src/lib/state"
+import { COPILOT_COLLABORATION_NAMESPACE } from "../src/routes/_shared/collaboration-compat"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -55,7 +56,91 @@ describe("Responses streaming HTTP lifecycle", () => {
       status: "completed",
     })
   })
+})
 
+describe("Responses collaboration compatibility", () => {
+  test("restores plaintext collaboration calls in native non-stream responses", async () => {
+    setModel("gpt-5.6-sol", ["/responses"])
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        Response.json({
+          id: "resp_collaboration",
+          object: "response",
+          created_at: 1,
+          model: "gpt-5.6-sol",
+          status: "completed",
+          output: [collaborationCall("fc_non_stream")],
+          error: null,
+          incomplete_details: null,
+        }),
+      ),
+    ) as unknown as typeof fetch
+
+    const response = await server.request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "delegate" }),
+    })
+    const body = (await response.json()) as {
+      output: Array<Record<string, unknown>>
+    }
+
+    expect(body.output[0]).toMatchObject({
+      namespace: "collaboration",
+      encrypted_function_args: [],
+    })
+  })
+
+  test("restores plaintext collaboration calls before streaming them", async () => {
+    setModel("gpt-5.6-sol", ["/responses"])
+    const call = collaborationCall("fc_stream")
+    const responseObject = {
+      id: "resp_collaboration_stream",
+      object: "response",
+      created_at: 1,
+      model: "gpt-5.6-sol",
+      status: "completed",
+      output: [call],
+      error: null,
+      incomplete_details: null,
+    }
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        sseResponse([
+          JSON.stringify({
+            type: "response.output_item.added",
+            sequence_number: 1,
+            output_index: 0,
+            item: call,
+          }),
+          JSON.stringify({
+            type: "response.completed",
+            sequence_number: 2,
+            response: responseObject,
+          }),
+        ]),
+      ),
+    ) as unknown as typeof fetch
+
+    const response = await streamingRequest("gpt-5.6-sol")
+    const events = parseSseData(await response.text())
+    const added = events[0].item as Record<string, unknown>
+    const completedResponse = events[1].response as {
+      output: Array<Record<string, unknown>>
+    }
+
+    expect(added).toMatchObject({
+      namespace: "collaboration",
+      encrypted_function_args: [],
+    })
+    expect(completedResponse.output[0]).toMatchObject({
+      namespace: "collaboration",
+      encrypted_function_args: [],
+    })
+  })
+})
+
+describe("Responses streaming HTTP lifecycle", () => {
   test("turns fallback [DONE] without finish_reason into one response.failed", async () => {
     setModel("gpt-4.1", ["/chat/completions"])
     globalThis.fetch = mock(() =>
@@ -374,6 +459,18 @@ function setModel(id: string, supportedEndpoints: Array<string>): void {
       },
     ],
   } as unknown as ModelsResponse
+}
+
+function collaborationCall(id: string): Record<string, unknown> {
+  return {
+    type: "function_call",
+    id,
+    call_id: `call_${id}`,
+    namespace: COPILOT_COLLABORATION_NAMESPACE,
+    name: "spawn_agent",
+    arguments: '{"task_name":"canary","message":"TRACE-4821"}',
+    status: "completed",
+  }
 }
 
 function sseResponse(data: Array<string>): Response {

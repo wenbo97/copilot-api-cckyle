@@ -89,6 +89,7 @@ export interface ResponseInputMessage {
 export interface ResponseInputFunctionCall {
   type: "function_call"
   call_id: string
+  namespace?: string
   name: string
   arguments: string
 }
@@ -187,8 +188,10 @@ export interface ResponseOutputFunctionCall {
   type: "function_call"
   id: string
   call_id: string
+  namespace?: string
   name: string
   arguments: string
+  encrypted_function_args?: Array<string>
   status: "in_progress" | "completed" | "incomplete"
 }
 

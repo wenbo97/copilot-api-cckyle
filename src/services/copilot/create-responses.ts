@@ -7,6 +7,7 @@ import type {
   ResponsesPayload,
 } from "~/routes/responses/responses-types"
 
+import { rewriteCollaborationForCopilot } from "~/routes/_shared/collaboration-compat"
 import {
   hasEncryptedContentPart,
   isEncryptedPart,
@@ -34,9 +35,11 @@ export const createResponses = async (
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
-  const body = sanitizeReasoningItems(
-    stripEncryptedContentParts(
-      normalizeToolDescriptions(normalizeReasoningEffort(payload)),
+  const body = rewriteCollaborationForCopilot(
+    sanitizeReasoningItems(
+      stripEncryptedContentParts(
+        normalizeToolDescriptions(normalizeReasoningEffort(payload)),
+      ),
     ),
   )
 

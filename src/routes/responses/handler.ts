@@ -22,6 +22,10 @@ import {
 import type { ResponseObject } from "./responses-types"
 import type { ResponsesPayload, ResponseStreamState } from "./responses-types"
 
+import {
+  redactCollaborationForLogging,
+  restoreCollaborationForCodex,
+} from "../_shared/collaboration-compat"
 import { isKnownReasoningEffort } from "../_shared/reasoning-policy"
 import { StreamItemIdNormalizer } from "../_shared/stream-item-id"
 import { validateResponsesFallback } from "./fallback-capabilities"
@@ -45,7 +49,7 @@ export async function handleResponses(c: Context) {
   let payload = await c.req.json<ResponsesPayload>()
   consola.debug(
     "Responses API request payload:",
-    JSON.stringify(payload).slice(-400),
+    JSON.stringify(redactCollaborationForLogging(payload)).slice(-400),
   )
 
   // Normalize the requested model id to a catalog id ONCE (exact id → alias →
@@ -91,13 +95,13 @@ async function handleResponsesFallback(c: Context, payload: ResponsesPayload) {
 
   const traceTimestamp = await traceRequest({
     type: "responses",
-    original: payload,
+    original: redactCollaborationForLogging(payload),
   })
 
   const openAIPayload = translateToOpenAI(payload)
   consola.debug(
     "Translated OpenAI request payload:",
-    JSON.stringify(openAIPayload),
+    JSON.stringify(redactCollaborationForLogging(openAIPayload)),
   )
 
   if (state.manualApprove) await awaitApproval()
@@ -111,11 +115,15 @@ async function handleResponsesFallback(c: Context, payload: ResponsesPayload) {
   if (isNonStreaming(response)) {
     consola.debug(
       "Non-streaming response from Copilot:",
-      JSON.stringify(response).slice(-400),
+      JSON.stringify(redactCollaborationForLogging(response)).slice(-400),
     )
     const responsesResponse = translateToResponses(response, payload.metadata)
     await traceResponse(
-      { type: "responses", openai: response, translated: responsesResponse },
+      redactCollaborationForLogging({
+        type: "responses",
+        openai: response,
+        translated: responsesResponse,
+      }),
       traceTimestamp,
     )
     return c.json(responsesResponse)
@@ -154,7 +162,10 @@ function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
     try {
       for await (const rawEvent of response) {
         if (c.req.raw.signal.aborted) break
-        consola.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
+        consola.debug(
+          "Copilot raw stream event:",
+          JSON.stringify(redactCollaborationForLogging(rawEvent)),
+        )
         if (rawEvent.data === "[DONE]") {
           endedWithDone = true
           break
@@ -168,8 +179,13 @@ function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
         )
 
         for (const event of translatedEvents) {
-          consola.debug("Translated Responses event:", JSON.stringify(event))
-          streamTracer.addChunk({ openai: chunk, responses: event })
+          consola.debug(
+            "Translated Responses event:",
+            JSON.stringify(redactCollaborationForLogging(event)),
+          )
+          streamTracer.addChunk(
+            redactCollaborationForLogging({ openai: chunk, responses: event }),
+          )
           await stream.writeSSE({
             event: event.type,
             data: JSON.stringify(event),
@@ -240,7 +256,7 @@ async function handleResponsesPassthrough(
 ) {
   const traceTimestamp = await traceRequest({
     type: "responses-passthrough",
-    original: payload,
+    original: redactCollaborationForLogging(payload),
   })
 
   if (state.manualApprove) await awaitApproval()
@@ -252,15 +268,19 @@ async function handleResponsesPassthrough(
   })
 
   if (isResponsesNonStreaming(response)) {
+    const restored = restoreCollaborationForCodex(response)
     consola.debug(
       "Non-streaming passthrough response from Copilot:",
-      JSON.stringify(response).slice(-400),
+      JSON.stringify(redactCollaborationForLogging(restored)).slice(-400),
     )
     await traceResponse(
-      { type: "responses-passthrough", native: response },
+      redactCollaborationForLogging({
+        type: "responses-passthrough",
+        native: restored,
+      }),
       traceTimestamp,
     )
-    return c.json(response)
+    return c.json(restored)
   }
 
   consola.debug("Streaming passthrough response from Copilot")
@@ -276,18 +296,23 @@ async function handleResponsesPassthrough(
     try {
       for await (const rawEvent of response) {
         if (c.req.raw.signal.aborted) break
-        consola.debug("Copilot raw responses event:", JSON.stringify(rawEvent))
         if (rawEvent.data === "[DONE]") {
+          consola.debug("Copilot raw responses event: [DONE]")
           endedWithDone = true
           break
         }
         if (!rawEvent.data) continue
 
-        const fixed = normalizer.normalize(
+        const restored = restoreCollaborationForCodex(
           parseNativeResponsesSseData(rawEvent.data),
         )
+        consola.debug(
+          "Copilot raw responses event:",
+          JSON.stringify(redactCollaborationForLogging(restored)),
+        )
+        const fixed = normalizer.normalize(restored)
         tracker.observe(fixed)
-        streamTracer.addChunk(fixed)
+        streamTracer.addChunk(redactCollaborationForLogging(fixed))
         await stream.writeSSE({
           event: fixed.type,
           data: JSON.stringify(fixed),
@@ -339,7 +364,7 @@ async function writeSyntheticFailure(
 ): Promise<void> {
   const { state, stream, tracer } = context
   for (const event of translateStreamFailureToResponseEvents(message, state)) {
-    tracer.addChunk({ responses: event })
+    tracer.addChunk(redactCollaborationForLogging({ responses: event }))
     await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
   }
 }
@@ -356,7 +381,7 @@ async function writeNativeFailure(
 ): Promise<void> {
   const { stream, tracer, tracker } = context
   for (const event of tracker.fail(message)) {
-    tracer.addChunk(event)
+    tracer.addChunk(redactCollaborationForLogging(event))
     await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
   }
 }

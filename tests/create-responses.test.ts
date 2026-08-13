@@ -3,6 +3,7 @@ import { test, expect, mock, beforeEach, describe } from "bun:test"
 import type { ResponsesPayload } from "../src/routes/responses/responses-types"
 
 import { state } from "../src/lib/state"
+import { COPILOT_COLLABORATION_NAMESPACE } from "../src/routes/_shared/collaboration-compat"
 import { UNREADABLE_PAYLOAD_MARKER } from "../src/routes/_shared/encrypted-content"
 import { server } from "../src/server"
 import {
@@ -274,6 +275,50 @@ test("normalizes Codex additional_tools items before Responses egress", async ()
     Record<string, unknown>
   >
   expect("description" in children[0]).toBe(false)
+})
+
+test("aliases collaboration and disables message encryption before Responses egress", async () => {
+  await createResponses({
+    model: "gpt-5.6-sol",
+    input: "hi",
+    tools: [
+      {
+        type: "namespace",
+        name: "collaboration",
+        description: "Coordinate sub-agents.",
+        tools: [
+          {
+            type: "function",
+            name: "spawn_agent",
+            description: "Spawn an agent.",
+            parameters: {
+              type: "object",
+              properties: {
+                task_name: { type: "string" },
+                message: { type: "string", encrypted: true },
+              },
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as ResponsesPayload)
+
+  const [, opts] = callArgs()
+  const body = JSON.parse(opts.body) as {
+    tools: Array<{
+      name: string
+      tools: Array<{
+        parameters: {
+          properties: { message: { encrypted?: boolean } }
+        }
+      }>
+    }>
+  }
+  expect(body.tools[0].name).toBe(COPILOT_COLLABORATION_NAMESPACE)
+  expect(body.tools[0].tools[0].parameters.properties.message.encrypted).toBe(
+    false,
+  )
 })
 
 test("omits blank function descriptions before Responses egress", async () => {
