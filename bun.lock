@@ -10,7 +10,7 @@
         "consola": "^3.4.2",
         "fetch-event-stream": "^0.1.5",
         "gpt-tokenizer": "^3.0.1",
-        "hono": "^4.9.9",
+        "hono": "4.9.9",
         "proxy-from-env": "^1.1.0",
         "srvx": "^0.11.16",
         "tiny-invariant": "^1.3.3",
@@ -31,6 +31,9 @@
         "typescript": "^5.9.3",
       },
     },
+  },
+  "patchedDependencies": {
+    "hono@4.9.9": "patches/hono@4.9.9.patch",
   },
   "packages": {
     "@altano/repository-tools": ["@altano/repository-tools@2.0.1", "", {}, "sha512-YE/52CkFtb+YtHPgbWPai7oo5N9AKnMuP5LM+i2AG7G1H2jdYBCO1iDnkDE3dZ3C1MIgckaF+d5PNRulgt0bdw=="],
@@ -553,7 +556,7 @@
 
     "hasown": ["hasown@2.0.2", "", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ=="],
 
-    "hono": ["hono@4.9.9", "", {}, "sha512-Hxw4wT6zjJGZJdkJzAx9PyBdf7ZpxaTSA0NfxqjLghwMrLBX8p33hJBzoETRakF3UJu6OdNQBZAlNSkGqKFukw=="],
+    "hono": ["hono@4.9.9", "https://o365exchange.pkgs.visualstudio.com/_packaging/Enzyme/npm/registry/hono/-/hono-4.9.9.tgz", {}, "sha1-oy7gKlqcS+jn9NSOThgec4odZdc="],
 
     "hookable": ["hookable@5.5.3", "", {}, "sha512-Yc+BQe8SvoXH1643Qez1zqLRmbA5rCL+sSmk6TVos0LWVfNIB7PGncdlId77WzLGSIB5KaWgTaNTs2lNVEI6VQ=="],
 

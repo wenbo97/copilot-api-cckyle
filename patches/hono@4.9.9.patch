@@ -1,0 +1,38 @@
+diff --git a/dist/cjs/utils/stream.js b/dist/cjs/utils/stream.js
+index 9f7d1b0f2237d8f4e35f470a519621e7b4ebd2ab..3da56884cd27ddb1f440beba505aeac2603988a9 100644
+--- a/dist/cjs/utils/stream.js
++++ b/dist/cjs/utils/stream.js
+@@ -82,7 +82,13 @@ class StreamingApi {
+   abort() {
+     if (!this.aborted) {
+       this.aborted = true;
+-      this.abortSubscribers.forEach((subscriber) => subscriber());
++      this.abortSubscribers.forEach((subscriber) => {
++        try {
++          void Promise.resolve(subscriber()).catch(() => {});
++        } catch {
++          // Ignore synchronous listener errors.
++        }
++      });
+     }
+   }
+ }
+diff --git a/dist/utils/stream.js b/dist/utils/stream.js
+index 68f3e5f51dcde13c0a181148880281335bf5dcf9..1a9f221ead61b1344bb0946d9b750ea19a3dd5ec 100644
+--- a/dist/utils/stream.js
++++ b/dist/utils/stream.js
+@@ -60,7 +60,13 @@ var StreamingApi = class {
+   abort() {
+     if (!this.aborted) {
+       this.aborted = true;
+-      this.abortSubscribers.forEach((subscriber) => subscriber());
++      this.abortSubscribers.forEach((subscriber) => {
++        try {
++          void Promise.resolve(subscriber()).catch(() => {});
++        } catch {
++          // Ignore synchronous listener errors.
++        }
++      });
+     }
+   }
+ };
