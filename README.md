@@ -88,6 +88,9 @@ Copy `.env.example` to `.env`. Fork-relevant keys:
 | `COPILOT_STREAM_IDLE_TIMEOUT_MS` | Optional Responses upstream SSE inactivity deadline; all SSE activity resets it. | disabled |
 | `COPILOT_TOTAL_TIMEOUT_MS` | Optional total Responses upstream stream deadline. | disabled |
 | `TRACE_OUTPUT_FOLDER` | Where request/response traces go when `--trace` is set. | `./traces` |
+| `COPILOT_CACHE_DIAGNOSTICS` | Set to `1` or `true` for native Responses cache/usage summaries in the proxy log. | disabled |
+| `COPILOT_CACHE_POLICY` | `prefix-v1` enables the experimental native Responses prefix policy; `off` disables it. | `off` |
+| `COPILOT_CACHE_NAMESPACE` | Stable per-account/workspace scope used only to generate a missing cache key. | none |
 
 `MODEL_MAPPINGS` example (maps the IDs Claude Code sends to internal Copilot model names):
 
@@ -104,9 +107,122 @@ MODEL_MAPPINGS="claude-opus-4-8:claude-opus-4.8,claude-opus-4-7:claude-opus-4.7-
 
 ## Development
 
+### Opt-in prefix cache policy
+
+`prefix-v1` changes the outgoing caching configuration. It adds one explicit
+`prompt_cache_breakpoint` to the final text block of the first eligible leading
+developer message, and retains implicit caching for the growing history.
+This allows a reusable instruction prefix to have its own cache boundary when
+later user inputs differ. Top-level `instructions`, message roles, tool order,
+and reasoning ciphertext are preserved. String developer content is represented
+as one equivalent `input_text` block so it can carry the marker.
+The cache policy does not disable reasoning or override `reasoning.effort`.
+Existing model-capability normalization still applies independently of caching.
+
+Enable it when starting the proxy, for example in PowerShell:
+
+```powershell
+$env:COPILOT_CACHE_POLICY = "prefix-v1"
+$env:COPILOT_CACHE_NAMESPACE = "my-account:my-workspace:v1"
+$env:COPILOT_CACHE_DIAGNOSTICS = "1"
+bun run dev
+```
+
+The namespace is required only for generating an absent `prompt_cache_key`.
+Choose a stable account/workspace scope and keep it unchanged between turns and
+restarts. The generated key hashes this scope, endpoint/account type, model,
+instructions, tools, and fixed generation configuration. It never hashes the
+growing history, includes credentials, or changes randomly per request.
+Existing client keys, including explicit null values, are preserved. The key
+helps cache routing; it is not an access-control or session identifier.
+
+The policy is limited to native `/responses` requests for `gpt-6-astra`,
+`gpt-5.6-sol`, `gpt-5.6-sol-fast`, `gpt-5.6-terra`, and `gpt-5.6-luna`.
+Other models/endpoints and server-side continuation requests are left alone.
+Existing explicit breakpoints, explicit-only/null cache options, or a supplied
+legacy retention option are treated as client-managed. An existing implicit
+options object is preserved verbatim; otherwise a successful prefix adaptation
+adds `{ "mode": "implicit", "ttl": "30m" }`.
+
+The prefix search stops at user/assistant/history content. It does not move
+top-level instructions into a new message or insert an empty prompt. Without an
+eligible leading developer message, the policy can only supply a missing key.
+The diagnostics summary's `cache_policy` records `applied`, `key_only`,
+`no_prefix`, or the reason it skipped the request. It also records key ownership
+and whether a breakpoint was added.
+
+This implementation follows [OpenAI's prompt caching contract](https://developers.openai.com/api/docs/guides/prompt-caching).
+The listed models' OpenAI capabilities do not prove Copilot endpoint acceptance
+or account-level benefits. The policy is therefore off by default. Cache writes
+may carry an additional cost; compare reported reads, writes, actual task cost,
+and latency on normal work before concluding that it saves quota. It does not
+pad prompts to reach a caching threshold. The cache policy introduces no retries
+and never replays a request with cache parameters removed after a rejection.
+Set `COPILOT_CACHE_POLICY=off` to roll back.
+
+### Passive cache measurements
+
+Set `COPILOT_CACHE_DIAGNOSTICS=1` when starting the proxy to emit one
+`[cache-diagnostics]` JSON summary per native `/responses` request. This makes
+no additional model requests and does not require `--trace`. The summary
+contains upstream attempts, input/output tokens, cache reads/writes when
+reported, Copilot-reported nano-AIU, request body size, and latency. Missing
+usage is `null`, including on failed requests; it is never reported as a cache
+miss merely because it is absent.
+
+For a token-weighted cache hit rate, divide the sum of `cached_input_tokens`
+by the sum of `input_tokens` over the same `usage_complete=true` samples.
+Also report the fraction of requests with complete usage. Keep results grouped
+by model; cache hit rate alone does not establish a reduction in task cost.
+Copilot-reported nano-AIU is not an independently verified account deduction.
+
+Ingress and final egress fingerprints preserve array order and use a random
+process-local HMAC key. They do not contain prompt text, raw cache keys, or
+credentials, and cannot be compared across process restarts. Fingerprint
+changes are not token-level cache measurements. Requests remain explicitly
+`uncorrelated` with an `unknown` task role until a reliable thread identifier
+is available: sharing a cache key does not establish a shared thread.
+
+`ttft_ms` measures the first nonempty streamed text, function-argument, or
+custom-tool-input delta;
+reasoning-only frames do not count. It is `null` for non-streaming requests.
+Timing starts after request compatibility transforms, before the upstream call;
+it excludes earlier inbound handling, rate-limit waits, and manual approval.
+This initial observer covers native Responses only, including Messages requests
+that use that egress. It does not yet provide cross-turn history comparisons or
+a complete per-task cost report.
+
+### Responses history rejected by Copilot
+
+Copilot can return HTTP 401 with the exact message
+`input item does not belong to this connection`. The proxy reports this known
+history rejection as HTTP 400 with code `copilot_input_connection_mismatch`
+and `param: "input"`, without refreshing authentication or automatically
+replaying the rejected request. Ordinary authentication 401s still receive at
+most one refresh and retry.
+
+This classification prevents an unhelpful auth retry; it does not repair the
+rejected history or establish why Copilot rejected it. Check that the history
+belongs to the current account and endpoint, or start a new conversation. The
+proxy preserves history items, reasoning ciphertext, and cache parameters.
+
+For Windows development, `bun run dev:cache` appends console output, including
+enabled cache summaries, to `tmps/cache-session.log`. It does not enable full
+payload tracing. The Windows launcher `start-copilot-api.cmd` uses this command.
+Set local cache options in the ignored `.env.local` file;
+the tracked `.env` and standard launcher leave the policy and diagnostics off.
+
+Use `bun run dev:trace` explicitly when you need full request/response captures
+in `traces/` (or `TRACE_OUTPUT_FOLDER`). Those files contain prompt, history,
+and tool content; full tracing is not needed for cache summaries.
+
+### Commands
+
 | Command | |
 | ------- | --- |
-| `bun run dev` | Watch-mode server (`--account-type enterprise`, port 4141) |
+| `bun run dev` | Development server (`--account-type enterprise`, port 4141), without full tracing |
+| `bun run dev:cache` | Windows console-log capture; cache summaries require `COPILOT_CACHE_DIAGNOSTICS=1` |
+| `bun run dev:trace` | Development server with full request/response tracing |
 | `bun run lint` | ESLint (`@echristian/eslint-config`) |
 | `bun test` | Unit test suite |
 | `bun run typecheck` | `tsc` |

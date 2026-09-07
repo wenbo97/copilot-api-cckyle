@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "lib": ["ESNext"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
 
@@ -17,7 +17,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
-    "baseUrl": ".",
     "paths": {
       "~/*": ["./src/*"]
     }

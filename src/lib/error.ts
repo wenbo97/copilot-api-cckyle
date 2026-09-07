@@ -12,8 +12,33 @@ export class HTTPError extends Error {
   }
 }
 
+export class InvalidRequestError extends Error {
+  readonly code: string
+  readonly param: string
+
+  constructor(message: string, code: string, param: string) {
+    super(message)
+    this.code = code
+    this.param = param
+  }
+}
+
 export async function forwardError(c: Context, error: unknown) {
   consola.error("Error occurred:", error)
+
+  if (error instanceof InvalidRequestError) {
+    return c.json(
+      {
+        error: {
+          message: error.message,
+          type: "invalid_request_error",
+          code: error.code,
+          param: error.param,
+        },
+      },
+      400,
+    )
+  }
 
   if (error instanceof HTTPError) {
     const errorText = await error.response.text()

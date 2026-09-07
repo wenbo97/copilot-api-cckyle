@@ -338,24 +338,27 @@ describe("synthetic Responses output ordering", () => {
 
 describe("synthetic Responses stream terminal state", () => {
   test.each([
-    ["length", "max_output_tokens"],
-    ["content_filter", "content_filter"],
-  ] as const)("maps %s to response.incomplete (%s)", (finishReason, reason) => {
-    const state = freshState()
-    const events = [
-      ...translateChunkToResponseEvents(chunk({ content: "partial" }), state),
-      ...translateChunkToResponseEvents(chunk({}, finishReason), state),
-    ]
+    { finishReason: "length", reason: "max_output_tokens" },
+    { finishReason: "content_filter", reason: "content_filter" },
+  ] as const)(
+    "maps finish reason to response.incomplete",
+    ({ finishReason, reason }) => {
+      const state = freshState()
+      const events = [
+        ...translateChunkToResponseEvents(chunk({ content: "partial" }), state),
+        ...translateChunkToResponseEvents(chunk({}, finishReason), state),
+      ]
 
-    const terminal = findTerminal(events)
-    expect(terminal.type).toBe("response.incomplete")
-    expect(terminal.response.status).toBe("incomplete")
-    expect(terminal.response.incomplete_details).toEqual({ reason })
-    expect(terminal.response.output[0]).toMatchObject({
-      type: "message",
-      status: "incomplete",
-    })
-  })
+      const terminal = findTerminal(events)
+      expect(terminal.type).toBe("response.incomplete")
+      expect(terminal.response.status).toBe("incomplete")
+      expect(terminal.response.incomplete_details).toEqual({ reason })
+      expect(terminal.response.output[0]).toMatchObject({
+        type: "message",
+        status: "incomplete",
+      })
+    },
+  )
 
   test("emits one terminal event even if finish is repeated", () => {
     const state = freshState()
@@ -430,31 +433,34 @@ describe("synthetic Responses stream terminal state", () => {
 
 describe("synthetic non-streaming Responses terminal state", () => {
   test.each([
-    ["length", "max_output_tokens"],
-    ["content_filter", "content_filter"],
-  ] as const)("maps %s to an incomplete response", (finishReason, reason) => {
-    const response = translateToResponses({
-      id: "chatcmpl_non_stream",
-      object: "chat.completion",
-      created: 1_700_000_000,
-      model: "gpt-4.1",
-      choices: [
-        {
-          index: 0,
-          message: { role: "assistant", content: "partial" },
-          logprobs: null,
-          finish_reason: finishReason,
-        },
-      ],
-    })
+    { finishReason: "length", reason: "max_output_tokens" },
+    { finishReason: "content_filter", reason: "content_filter" },
+  ] as const)(
+    "maps finish reason to an incomplete response",
+    ({ finishReason, reason }) => {
+      const response = translateToResponses({
+        id: "chatcmpl_non_stream",
+        object: "chat.completion",
+        created: 1_700_000_000,
+        model: "gpt-4.1",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "partial" },
+            logprobs: null,
+            finish_reason: finishReason,
+          },
+        ],
+      })
 
-    expect(response.status).toBe("incomplete")
-    expect(response.incomplete_details).toEqual({ reason })
-    expect(response.output[0]).toMatchObject({
-      type: "message",
-      status: "incomplete",
-    })
-  })
+      expect(response.status).toBe("incomplete")
+      expect(response.incomplete_details).toEqual({ reason })
+      expect(response.output[0]).toMatchObject({
+        type: "message",
+        status: "incomplete",
+      })
+    },
+  )
 
   test("maps an unknown upstream finish reason to a failed response", () => {
     const response = translateToResponses({

@@ -7,6 +7,9 @@ import type {
   ResponsesPayload,
 } from "~/routes/responses/responses-types"
 
+import { applyResponsesCachePolicy } from "~/lib/responses-cache-policy"
+import { ResponsesDiagnostics } from "~/lib/responses-diagnostics"
+import { state } from "~/lib/state"
 import { rewriteCollaborationForCopilot } from "~/routes/_shared/collaboration-compat"
 import {
   hasEncryptedContentPart,
@@ -35,13 +38,28 @@ export const createResponses = async (
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
-  const body = rewriteCollaborationForCopilot(
+  const compatible = rewriteCollaborationForCopilot(
     sanitizeReasoningItems(
       stripEncryptedContentParts(
         normalizeToolDescriptions(normalizeReasoningEffort(payload)),
       ),
     ),
   )
+  const { payload: body, summary: cachePolicy } = applyResponsesCachePolicy(
+    compatible,
+    {
+      endpoint: "/responses",
+      accountType: state.accountType,
+    },
+  )
+  const serializedBody = JSON.stringify(body)
+  const diagnostics = ResponsesDiagnostics.start({
+    ingress: payload,
+    egress: body,
+    serializedBody,
+    signal: options.signal,
+    cachePolicy,
+  })
 
   const extraHeaders: Record<string, string> = {
     "X-Initiator": isAgentCall ? "agent" : "user",
@@ -56,16 +74,25 @@ export const createResponses = async (
   try {
     const response = await copilotFetch("/responses", {
       method: "POST",
-      body: JSON.stringify(body),
+      body: serializedBody,
       extraHeaders,
       signal: streamLifecycle?.signal ?? options.signal,
       headerTimeoutMs: options.headerTimeoutMs,
+      onAttempt: diagnostics ? () => diagnostics.recordAttempt() : undefined,
     })
 
-    if (streamLifecycle) return streamLifecycle.iterate(response)
+    if (streamLifecycle) {
+      const events = streamLifecycle.iterate(response)
+      return diagnostics ? diagnostics.iterate(events) : events
+    }
 
-    return (await response.json()) as ResponseObject
+    const result = (await response.json()) as ResponseObject
+    diagnostics?.observeResponse(result)
+    diagnostics?.finish()
+    return result
   } catch (error) {
+    diagnostics?.fail(error)
+    diagnostics?.finish()
     streamLifecycle?.dispose(error)
     throw error
   }

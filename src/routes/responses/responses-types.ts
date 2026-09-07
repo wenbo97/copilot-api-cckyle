@@ -40,6 +40,7 @@ export interface ResponsesPayload {
   stream_options?: ResponseStreamOptions | null
   prompt_cache_key?: string | null
   prompt_cache_retention?: "in_memory" | "24h" | null
+  prompt_cache_options?: ResponsePromptCacheOptions | null
   safety_identifier?: string | null
   service_tier?:
     | "auto"
@@ -59,6 +60,15 @@ export interface ResponseTextConfig {
 
 export interface ResponseStreamOptions {
   include_obfuscation?: boolean
+}
+
+export interface ResponsePromptCacheOptions {
+  mode?: "implicit" | "explicit"
+  ttl?: "30m"
+}
+
+export interface ResponsePromptCacheBreakpoint {
+  mode: "explicit"
 }
 
 export type ResponseTextFormat =
@@ -105,7 +115,11 @@ export interface ResponseInputFunctionCallOutput {
 // `output_text` (the backend 400s on an `input_text` part inside an assistant
 // message). `input_image` only applies to user input.
 export type ResponseInputContentPart =
-  | { type: "input_text"; text: string }
+  | {
+      type: "input_text"
+      text: string
+      prompt_cache_breakpoint?: ResponsePromptCacheBreakpoint
+    }
   | { type: "output_text"; text: string }
   | { type: "input_image"; image_url: string; detail?: "low" | "high" | "auto" }
 

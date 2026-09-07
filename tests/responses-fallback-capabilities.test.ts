@@ -153,12 +153,15 @@ describe("Responses -> Chat fallback capability matrix", () => {
 
 describe("Responses -> Chat fallback rejection and replay rules", () => {
   test.each([
-    ["previous_response_id", { previous_response_id: "resp_previous" }],
-    ["conversation", { conversation: "conv_1" }],
-    ["store", { store: true }],
-    ["truncation", { truncation: "auto" }],
-    ["background", { background: true }],
-  ])("rejects unsupported top-level feature %s", (param, overrides) => {
+    {
+      param: "previous_response_id",
+      overrides: { previous_response_id: "resp_previous" },
+    },
+    { param: "conversation", overrides: { conversation: "conv_1" } },
+    { param: "store", overrides: { store: true } },
+    { param: "truncation", overrides: { truncation: "auto" } },
+    { param: "background", overrides: { background: true } },
+  ])("rejects unsupported top-level feature", ({ param, overrides }) => {
     setChatModel()
     expect(validateResponsesFallback(payload(overrides))).toMatchObject({
       type: "invalid_request_error",

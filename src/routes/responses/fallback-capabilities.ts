@@ -225,6 +225,9 @@ function validateInput(
     if (!isRecord(item)) return fail(payload, `input[${itemIndex}]`)
     const type = typeof item.type === "string" ? item.type : "message"
 
+    const cacheError = validateInputCacheBreakpoints(payload, item, itemIndex)
+    if (cacheError) return cacheError
+
     if (REPLAY_ITEM_TYPES.has(type)) continue
     if (type === "function_call" || type === "function_call_output") continue
     if (!MESSAGE_ITEM_TYPES.has(type))
@@ -236,6 +239,24 @@ function validateInput(
       supports,
     })
     if (contentError) return contentError
+  }
+}
+
+function validateInputCacheBreakpoints(
+  payload: ResponsesPayload,
+  item: Record<string, unknown>,
+  itemIndex: number,
+): ResponsesFallbackError | undefined {
+  for (const field of ["content", "output"]) {
+    const parts = item[field]
+    if (!Array.isArray(parts)) continue
+    for (const [partIndex, part] of parts.entries()) {
+      if (isRecord(part) && !isNoop(part.prompt_cache_breakpoint))
+        return fail(
+          payload,
+          `input[${itemIndex}].${field}[${partIndex}].prompt_cache_breakpoint`,
+        )
+    }
   }
 }
 

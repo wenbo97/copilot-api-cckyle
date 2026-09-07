@@ -9,6 +9,7 @@ echo.
 
 ECHO Starting Copilot-Api service...
 
-CALL CD /D %~dp0 && npm run dev
+cd /d "%~dp0" || exit /b 1
+bun run dev:cache
 
 pause
