@@ -26,7 +26,7 @@
     "build": "tsdown",
     "dev": "bun run ./src/main.ts start --account-type enterprise",
     "dev-debug": "npx tsx ./src/main.ts start --account-type enterprise",
-    "dev:cache": "powershell -NoProfile -Command \"[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); New-Item -ItemType Directory -Force tmps | Out-Null; cmd.exe /d /c 'bun run dev 2>&1' | Tee-Object -FilePath tmps/cache-session.log -Append; exit (Get-Variable LASTEXITCODE -ValueOnly)\"",
+    "dev:cache": "bun run ./scripts/dev-cache.ts",
     "dev:trace": "bun run dev --trace",
     "internal-install": "artifacts-npm-credprovider && npm install && bun install",
     "knip": "knip-bun",

@@ -206,9 +206,15 @@ rejected history or establish why Copilot rejected it. Check that the history
 belongs to the current account and endpoint, or start a new conversation. The
 proxy preserves history items, reasoning ciphertext, and cache parameters.
 
-For Windows development, `bun run dev:cache` appends console output, including
-enabled cache summaries, to `tmps/cache-session.log`. It does not enable full
-payload tracing. The Windows launcher `start-copilot-api.cmd` uses this command.
+For development, `bun run dev:cache` uses `scripts/dev-cache.ts` to start the
+same enterprise server as `dev`. Normal application logs and enabled cache
+summaries appear both on the console and in `tmps/cache-session.log`; debug
+messages go only to the file. Debug messages can include request/response
+payloads. File output is appended, with timestamps and no terminal colors.
+New logs use UTF-8; existing PowerShell UTF-16LE logs keep their encoding.
+Arguments are forwarded, for example `bun run dev:cache --port 4142`.
+Full `--trace` captures remain opt-in. The Windows launcher
+`start-copilot-api.cmd` uses this command.
 Set local cache options in the ignored `.env.local` file;
 the tracked `.env` and standard launcher leave the policy and diagnostics off.
 
@@ -221,7 +227,7 @@ and tool content; full tracing is not needed for cache summaries.
 | Command | |
 | ------- | --- |
 | `bun run dev` | Development server (`--account-type enterprise`, port 4141), without full tracing |
-| `bun run dev:cache` | Windows console-log capture; cache summaries require `COPILOT_CACHE_DIAGNOSTICS=1` |
+| `bun run dev:cache` | Console logs plus file-only debug logs; cache summaries require `COPILOT_CACHE_DIAGNOSTICS=1` |
 | `bun run dev:trace` | Development server with full request/response tracing |
 | `bun run lint` | ESLint (`@echristian/eslint-config`) |
 | `bun test` | Unit test suite |
