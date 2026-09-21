@@ -54,7 +54,7 @@ afterEach(() => {
 
 describe("Responses input connection rejection", () => {
   test.each([false, true])(
-    "does not refresh authentication or replay rejected input (stream=%s)",
+    "retries rejected encrypted history once without refreshing authentication (stream=%s)",
     async (stream) => {
       const upstream = mock(() =>
         Promise.resolve(
@@ -84,7 +84,7 @@ describe("Responses input connection rejection", () => {
         }),
       })
 
-      expect(upstream).toHaveBeenCalledTimes(1)
+      expect(upstream).toHaveBeenCalledTimes(2)
       expect(ensureToken.mock.calls.some(([force]) => force === true)).toBe(
         false,
       )

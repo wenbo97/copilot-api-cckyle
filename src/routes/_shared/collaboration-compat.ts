@@ -96,6 +96,12 @@ export function restoreCollaborationForCodex<T>(value: T): T {
  */
 export function redactCollaborationForLogging<T>(value: T): T {
   return mapDeep(value, (record) => {
+    if (
+      (record.type === "reasoning" || record.type === "encrypted_content")
+      && typeof record.encrypted_content === "string"
+    ) {
+      return { ...record, encrypted_content: "[encrypted content redacted]" }
+    }
     if (record.type === "agent_message") return redactAgentMessage(record)
 
     if (record.type === "response.function_call_arguments.delta") {

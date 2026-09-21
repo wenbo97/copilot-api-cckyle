@@ -166,6 +166,21 @@ describe("restoreCollaborationForCodex", () => {
 })
 
 describe("redactCollaborationForLogging", () => {
+  test("redacts opaque reasoning on a logging copy without changing the wire payload", () => {
+    const value = {
+      input: [
+        {
+          type: "reasoning",
+          encrypted_content: "PRIVATE-REASONING",
+          summary: [],
+        },
+      ],
+    }
+    expect(JSON.stringify(redactCollaborationForLogging(value))).not.toContain(
+      "PRIVATE-REASONING",
+    )
+    expect(value.input[0].encrypted_content).toBe("PRIVATE-REASONING")
+  })
   test("redacts function arguments and agent payload text without mutating data", () => {
     const value = {
       calls: [

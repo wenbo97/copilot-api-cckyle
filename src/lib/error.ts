@@ -3,6 +3,8 @@ import type { ContentfulStatusCode } from "hono/utils/http-status"
 
 import consola from "consola"
 
+import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
+
 export class HTTPError extends Error {
   response: Response
 
@@ -24,6 +26,21 @@ export class InvalidRequestError extends Error {
 }
 
 export async function forwardError(c: Context, error: unknown) {
+  if (error instanceof ResponsesUpstreamError) {
+    consola.warn(
+      `[Responses] Upstream failure status=${error.status}, code=${error.code}`,
+    )
+    return c.json(
+      {
+        error: {
+          message: error.message,
+          type: "upstream_error",
+          code: error.code,
+        },
+      },
+      error.status as ContentfulStatusCode,
+    )
+  }
   consola.error("Error occurred:", error)
 
   if (error instanceof InvalidRequestError) {
