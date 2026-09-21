@@ -54,6 +54,55 @@ The server binds explicitly to `127.0.0.1`. It is intentionally unavailable to o
 
 If remote or container access is required later, add a separate authenticated management boundary instead of exposing `/token` through the public API listener.
 
+## Responses history compatibility
+
+Native Responses requests retain encrypted reasoning by default. If an upstream
+explicitly rejects history with `input item does not belong to this connection`,
+the proxy can retry once before forwarding any Responses event. That retry removes
+only reasoning ciphertext that this proxy has not recorded as issued by that
+upstream. Messages, summaries, and tool call/result pairs remain intact. Ordinary
+authentication errors, rate limits, network failures, and failures after streaming
+has started do not trigger history cleanup.
+
+The proxy records SHA-256 receipts, not ciphertext, under
+`~/.local/share/copilot-api/responses-history/<upstream-hash>/`. Atomic immutable
+receipts survive restarts and allow concurrent writers. Keep this directory with
+the proxy's state and do not share it between different accounts. A corrupt or
+unwritable registry disables automatic cleanup while allowing otherwise healthy
+requests. The first recovery may discard previously valid but unregistered opaque
+reasoning; visible conversation history is preserved. Upstream 401 envelopes in
+SSE are decoded so failures retain their real cause instead of appearing only as a
+closed stream.
+
+Codex fork/resume acceptance against the configured HTTPS or loopback provider:
+
+```powershell
+bun run tests/acceptance/resume-remote.ts `
+  --base-url https://g5x5mg68-8314.usw3.devtunnels.ms/v1 `
+  --source-session 01a0c20f-c841-7871-a351-3b3fce86bcc5
+```
+
+This does not start or stop the provider. It creates a test fork and performs three independent `resume` turns with
+`gpt-6-astra`, reasoning `high`, and summaries `concise`. Only diagnostic messages
+are sent. The original session and user configuration are not edited. A successful
+remote run does not prove a local source change is deployed. See
+[the implementation and acceptance record](tests/acceptance/RESUME-COMPATIBILITY.md)
+for the observed source/deployment boundary.
+
+From Windows Command Prompt, fork the known session through the local `4141`
+service with this single command:
+
+```cmd
+set "OPENAI_API_KEY=dummy" && codex -c model_provider="copilotproxyry" -c model_providers.copilotproxyry.base_url="http://127.0.0.1:4141/v1" -c model_reasoning_effort="high" -c model_reasoning_summary="concise" -m gpt-6-astra fork 01a0c1e4-94b7-7382-8ac5-dfd04eeb3c89
+```
+
+Resume the resulting fork with the same provider and base URL. Replace
+`<FORK_SESSION_ID>` with the session ID printed by the fork command:
+
+```cmd
+set "OPENAI_API_KEY=dummy" && codex -c model_provider="copilotproxyry" -c model_providers.copilotproxyry.base_url="http://127.0.0.1:4141/v1" -c model_reasoning_effort="high" -c model_reasoning_summary="concise" -m gpt-6-astra resume <FORK_SESSION_ID>
+```
+
 ## Token sources
 
 The proxy resolves a Copilot token in this order:

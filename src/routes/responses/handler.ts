@@ -14,6 +14,7 @@ import {
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import { createResponses } from "~/services/copilot/create-responses"
+import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
 import {
   readCopilotHeaderTimeoutMs,
   readCopilotStreamTimeouts,
@@ -387,6 +388,9 @@ async function writeNativeFailure(
 }
 
 function describeStreamError(prefix: string, error: unknown): string {
+  if (error instanceof ResponsesUpstreamError) {
+    return `${prefix} (HTTP ${error.status}, ${error.code}): ${error.message}`
+  }
   const message = error instanceof Error ? error.message : String(error)
   return `${prefix}: ${message}`
 }

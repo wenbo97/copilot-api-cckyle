@@ -5,6 +5,11 @@ import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { ensureCopilotToken } from "~/lib/token"
 
+import {
+  parseResponsesJson,
+  responsesUpstreamError,
+} from "./responses-upstream-error"
+
 /**
  * Make a fetch request to the Copilot API with automatic token refresh on 401.
  * All Copilot API calls should go through this function.
@@ -28,6 +33,16 @@ export async function copilotFetch(
   const response = await makeRequest()
 
   if (response.status === 401) {
+    if (path === "/responses") {
+      const error = responsesUpstreamError(
+        parseResponsesJson(await response.clone().text()),
+        401,
+      )
+      if (error?.isHistoryOwnershipError) {
+        await response.body?.cancel()
+        throw error
+      }
+    }
     consola.warn(`Got 401 from ${path}, refreshing Copilot token and retrying`)
     await response.body?.cancel()
     await ensureCopilotToken(true)

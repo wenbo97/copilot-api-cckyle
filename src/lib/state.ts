@@ -1,6 +1,10 @@
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
 export interface State {
+  // Internal overrides used by isolated acceptance processes. Normal startup
+  // uses the application data directory and the actual Copilot endpoint.
+  responsesHistoryDirectory?: string
+  responsesHistoryScope?: string
   githubToken?: string
   copilotToken?: string
   copilotTokenExpiresAt?: number // Unix timestamp (seconds) when copilot token expires

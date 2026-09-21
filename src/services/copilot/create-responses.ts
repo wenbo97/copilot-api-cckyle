@@ -3,7 +3,6 @@ import consola from "consola"
 import type {
   ReasoningEffort,
   ResponseInputItem,
-  ResponseObject,
   ResponsesPayload,
 } from "~/routes/responses/responses-types"
 
@@ -17,8 +16,7 @@ import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
 
 import type { CopilotRequestOptions } from "./create-chat-completions"
 
-import { copilotFetch } from "./copilot-fetch"
-import { CopilotStreamLifecycle } from "./stream-lifecycle"
+import { requestResponsesWithHistoryRecovery } from "./responses-history-recovery"
 
 /**
  * Native `POST /responses` egress to the Copilot backend.
@@ -48,27 +46,7 @@ export const createResponses = async (
   }
   if (enableVision) extraHeaders["copilot-vision-request"] = "true"
 
-  const streamLifecycle =
-    payload.stream ?
-      new CopilotStreamLifecycle(options.signal, options.streamTimeouts)
-    : undefined
-
-  try {
-    const response = await copilotFetch("/responses", {
-      method: "POST",
-      body: JSON.stringify(body),
-      extraHeaders,
-      signal: streamLifecycle?.signal ?? options.signal,
-      headerTimeoutMs: options.headerTimeoutMs,
-    })
-
-    if (streamLifecycle) return streamLifecycle.iterate(response)
-
-    return (await response.json()) as ResponseObject
-  } catch (error) {
-    streamLifecycle?.dispose(error)
-    throw error
-  }
+  return requestResponsesWithHistoryRecovery(body, extraHeaders, options)
 }
 
 function normalizeReasoningEffort(payload: ResponsesPayload): ResponsesPayload {
