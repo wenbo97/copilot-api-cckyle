@@ -382,7 +382,7 @@ function readSchema(tools: unknown): unknown {
 // Import after installing the guard; even startup cannot fall back to old OAuth.
 const { runServer } = await import("~/start")
 await runServer({
-  port: 4143,
+  port: Number(process.env.ACCEPTANCE_PORT ?? "4143"),
   accountType: process.env.ACCEPTANCE_ACCOUNT_TYPE ?? "individual",
   verbose: false,
   manual: false,

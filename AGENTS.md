@@ -3,7 +3,7 @@
 ## Build, Lint, and Test Commands
 
 - **Build:**  
-  `bun run build` (uses tsup)
+  `bun run build` (uses tsdown)
 - **Dev:**  
   `bun run dev`
 - **Lint:**  
@@ -22,7 +22,7 @@
 - **Imports:**  
   Use ESNext syntax. Prefer absolute imports via `~/*` for `src/*` (see `tsconfig.json`).
 - **Formatting:**  
-  Follows Prettier (with `prettier-plugin-packagejson`). Run `bun run lint` to auto-fix.
+  Follows Prettier (with `prettier-plugin-packagejson`). Run `bun run lint -- --fix <paths>` to auto-fix selected files; `bun run lint` checks without fixing.
 - **Types:**  
   Strict TypeScript (`strict: true`). Avoid `any`; use explicit types and interfaces.
 - **Naming:**  

@@ -24,7 +24,15 @@ import { LiveTime } from "./local-live-time"
 import { parseEvents, validateResponseEvents } from "./local-wire"
 
 export const ROOT = path.resolve(import.meta.dir, "../../..")
-export const BASE_URL = "http://127.0.0.1:4143"
+export const ACCEPTANCE_PORT = Number(process.env.ACCEPTANCE_PORT ?? "4143")
+if (
+  !Number.isInteger(ACCEPTANCE_PORT)
+  || ACCEPTANCE_PORT < 1024
+  || ACCEPTANCE_PORT > 65535
+  || ACCEPTANCE_PORT === 4141
+)
+  throw new Error("Invalid isolated acceptance port")
+export const BASE_URL = `http://127.0.0.1:${ACCEPTANCE_PORT}`
 export const MODEL = "gpt-5.6-luna"
 export interface CaseResult {
   id: string
@@ -310,7 +318,7 @@ export class AcceptanceRuntime {
     // Bind first: never mistake an existing service for the new child.
     const probe = Bun.serve({
       hostname: "127.0.0.1",
-      port: 4143,
+      port: ACCEPTANCE_PORT,
       fetch: () => new Response("reserved"),
     })
     await probe.stop(true)
@@ -327,6 +335,7 @@ export class AcceptanceRuntime {
         stdout: "pipe",
         stderr: "pipe",
         env: childEnvironment({
+          ACCEPTANCE_PORT: String(ACCEPTANCE_PORT),
           ACCEPTANCE_CONTROL_URL: `http://127.0.0.1:${this.controller.port}`,
           ACCEPTANCE_SECRET: this.secret,
           ACCEPTANCE_DIRECTORY: this.directory,
