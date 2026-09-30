@@ -8,13 +8,15 @@ import type {
   ResponsesPayload,
 } from "~/routes/responses/responses-types"
 
-import { InvalidRequestError } from "~/lib/error"
+import { HTTPError } from "~/lib/error"
 
-import type { CopilotRequestOptions } from "./create-chat-completions"
+import type { CopilotRequestOptions } from "./request-options"
 
 import { copilotFetch } from "./copilot-fetch"
+import { readCopilotErrorDetail } from "./input-connection-error"
 import { ResponsesHistoryRegistry } from "./responses-history-registry"
 import {
+  type HistoryRecoverySummary,
   parseResponsesJson,
   responsesUpstreamError,
   ResponsesUpstreamError,
@@ -40,6 +42,10 @@ class HistoryRequest {
   private readonly requestId = randomUUID()
   private retried = false
   private forwarded = false
+  private readonly recovery: HistoryRecoverySummary = {
+    attempted: false,
+    removed: 0,
+  }
 
   constructor(
     body: ResponsesPayload,
@@ -61,6 +67,11 @@ class HistoryRequest {
   private async recover(error: unknown): Promise<boolean> {
     this.options.signal?.throwIfAborted()
     if (
+      (error instanceof ResponsesUpstreamError || error instanceof HTTPError)
+      && (isHistoryOwnershipError(error) || this.recovery.attempted)
+    )
+      error.recovery = this.recovery
+    if (
       this.retried
       || this.forwarded
       || !isHistoryOwnershipError(error)
@@ -69,26 +80,38 @@ class HistoryRequest {
       return false
     // Reserve the single retry before asynchronous receipt lookups.
     this.retried = true
-    await this.registry.ensureHealthy()
     let removed = 0
-    const input = await Promise.all(
-      this.body.input.map(async (item) => {
-        const value = item as unknown as Record<string, unknown>
-        if (
-          value.type !== "reasoning"
-          || typeof value.encrypted_content !== "string"
-        )
-          return item
-        if (await this.registry.isIssued(value.encrypted_content)) return item
-        const clean = { ...value }
-        delete clean.encrypted_content
-        removed++
-        return clean
-      }),
-    )
+    let input: ResponsesPayload["input"]
+    try {
+      await this.registry.ensureHealthy()
+      input = (await Promise.all(
+        this.body.input.map(async (item) => {
+          const value = item as unknown as Record<string, unknown>
+          if (
+            value.type !== "reasoning"
+            || typeof value.encrypted_content !== "string"
+          )
+            return item
+          if (await this.registry.isIssued(value.encrypted_content)) return item
+          const clean = { ...value }
+          delete clean.encrypted_content
+          removed++
+          return clean
+        }),
+      )) as ResponsesPayload["input"]
+    } catch (registryError) {
+      this.options.signal?.throwIfAborted()
+      this.recovery.disabledReason =
+        registryError instanceof Error ?
+          registryError.message
+        : "history registry unavailable"
+      return false
+    }
     if (removed === 0) return false
     this.options.signal?.throwIfAborted()
-    this.body = { ...this.body, input: input as ResponsesPayload["input"] }
+    this.recovery.attempted = true
+    this.recovery.removed = removed
+    this.body = { ...this.body, input: input }
     consola.warn(
       `[Responses] History recovery request=${this.requestId}, removed=${removed}, retry=1`,
     )
@@ -117,7 +140,24 @@ class HistoryRequest {
         return { response, lifecycle }
       } catch (error) {
         lifecycle?.dispose(error)
-        if (!(await this.recover(error))) throw error
+        // A retry can fail differently (e.g. 503). Once SSE has started, the
+        // HTTP forwarder cannot read that response, so preserve its cause here.
+        let failure = error
+        if (error instanceof HTTPError && this.recovery.attempted) {
+          const detail = await readCopilotErrorDetail(
+            error.response,
+            this.options.signal,
+          )
+          if (detail) {
+            await error.response.body?.cancel()
+            failure = new ResponsesUpstreamError(
+              error.response.status,
+              detail.message,
+              detail.code,
+            )
+          }
+        }
+        if (!(await this.recover(failure))) throw failure
       }
     }
   }
@@ -186,8 +226,6 @@ export function requestResponsesWithHistoryRecovery(
 
 function isHistoryOwnershipError(error: unknown): boolean {
   return (
-    (error instanceof ResponsesUpstreamError && error.isHistoryOwnershipError)
-    || (error instanceof InvalidRequestError
-      && error.code === "copilot_input_connection_mismatch")
+    error instanceof ResponsesUpstreamError && error.isHistoryOwnershipError
   )
 }

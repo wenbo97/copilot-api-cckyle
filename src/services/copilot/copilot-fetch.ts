@@ -21,7 +21,8 @@ export async function copilotFetch(
     onAttempt?: () => void
   } = {},
 ): Promise<Response> {
-  await ensureCopilotToken()
+  options.signal?.throwIfAborted()
+  await waitForAuthentication(ensureCopilotToken(), options.signal)
   options.signal?.throwIfAborted()
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -36,10 +37,8 @@ export async function copilotFetch(
     await rejectInputConnectionMismatch(path, response, options.signal)
     consola.warn(`Got 401 from ${path}, refreshing Copilot token and retrying`)
     await response.body?.cancel()
-    await ensureCopilotToken(true)
-    // Token refresh is deliberately process-scoped and is not tied to one
-    // client's signal. Check cancellation only after refresh, before retrying
-    // this request.
+    options.signal?.throwIfAborted()
+    await waitForAuthentication(ensureCopilotToken(true), options.signal)
     options.signal?.throwIfAborted()
     if (!state.copilotToken) {
       throw new HTTPError("Copilot token refresh failed", response)
@@ -60,6 +59,27 @@ export async function copilotFetch(
   }
 
   return response
+}
+
+/** Detach one caller without canceling the process-scoped refresh. */
+async function waitForAuthentication(
+  refresh: Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!signal) return refresh
+  let onAbort: (() => void) | undefined
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    // AbortSignal permits arbitrary reasons; propagate the caller's exact value.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    onAbort = () => reject(signal.reason)
+    signal.addEventListener("abort", onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
+  try {
+    await Promise.race([refresh, cancelled])
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort)
+  }
 }
 
 async function fetchWithHeaderTimeout(

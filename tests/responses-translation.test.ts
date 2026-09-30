@@ -97,6 +97,7 @@ describe("translateAnthropicToResponses (request)", () => {
         name: "get_weather",
         description: "Weather",
         parameters: { type: "object", properties: { city: {} } },
+        strict: false,
       },
     ])
     expect(out.tool_choice).toBe("required")
@@ -271,6 +272,7 @@ describe("translateResponsesToAnthropic (response)", () => {
     const resp: ResponseObject = {
       ...base,
       status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
       output: [
         {
           type: "message",
@@ -321,6 +323,8 @@ const charRespCompleted = (
   created_at: 0,
   model: "gpt-5.5",
   status,
+  incomplete_details:
+    status === "incomplete" ? { reason: "max_output_tokens" } : null,
   output: [],
   usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
   error: null,
@@ -357,6 +361,7 @@ describe("CHARACTERIZATION: translateTools (Anthropic -> Responses)", () => {
         name: "get_weather",
         description: "d",
         parameters: { type: "object" },
+        strict: false,
       },
     ])
   })
@@ -376,6 +381,7 @@ describe("CHARACTERIZATION: translateTools (Anthropic -> Responses)", () => {
         name: "t",
         description: undefined,
         parameters: { type: "object" },
+        strict: false,
       },
     ])
   })
@@ -424,8 +430,16 @@ describe("CHARACTERIZATION: deriveStopReason (non-stream, via translateResponses
     status: ResponseObject["status"],
     output: ResponseObject["output"],
   ) =>
-    translateResponsesToAnthropic({ ...base, status, output }, "gpt-5.5")
-      .stop_reason
+    translateResponsesToAnthropic(
+      {
+        ...base,
+        status,
+        output,
+        incomplete_details:
+          status === "incomplete" ? { reason: "max_output_tokens" } : null,
+      },
+      "gpt-5.5",
+    ).stop_reason
 
   test("plain completed text -> end_turn", () => {
     expect(
@@ -440,7 +454,7 @@ describe("CHARACTERIZATION: deriveStopReason (non-stream, via translateResponses
       ]),
     ).toBe("end_turn")
   })
-  test("has function_call -> tool_use (wins over status)", () => {
+  test("incomplete tool call -> max_tokens", () => {
     expect(
       stopReasonFor("incomplete", [
         {
@@ -452,7 +466,7 @@ describe("CHARACTERIZATION: deriveStopReason (non-stream, via translateResponses
           status: "completed",
         },
       ]),
-    ).toBe("tool_use")
+    ).toBe("max_tokens")
   })
   test("incomplete, no tool -> max_tokens", () => {
     expect(
@@ -485,13 +499,13 @@ describe("CHARACTERIZATION: deriveStopReason (stream, via Responses->Anthropic e
   test("no tool call, incomplete -> max_tokens", () => {
     const st = createResponsesToAnthropicState("gpt-5.5")
     const events = translateResponsesEventToAnthropicEvents(
-      { type: "response.completed", response: respCompleted("incomplete") },
+      { type: "response.incomplete", response: respCompleted("incomplete") },
       st,
     )
     expect(stopReasonFromStream(events)).toBe("max_tokens")
   })
 
-  test("function_call seen earlier -> tool_use (wins over status)", () => {
+  test("incomplete stream with tool call -> max_tokens", () => {
     const st = createResponsesToAnthropicState("gpt-5.5")
     translateResponsesEventToAnthropicEvents(
       {
@@ -509,10 +523,10 @@ describe("CHARACTERIZATION: deriveStopReason (stream, via Responses->Anthropic e
       st,
     )
     const events = translateResponsesEventToAnthropicEvents(
-      { type: "response.completed", response: respCompleted("incomplete") },
+      { type: "response.incomplete", response: respCompleted("incomplete") },
       st,
     )
-    expect(stopReasonFromStream(events)).toBe("tool_use")
+    expect(stopReasonFromStream(events)).toBe("max_tokens")
   })
 })
 

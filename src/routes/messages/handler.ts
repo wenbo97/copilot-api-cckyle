@@ -11,19 +11,24 @@ import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
 import {
   createChatCompletions,
-  type ChatCompletionChunk,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import { createMessages } from "~/services/copilot/create-messages"
 import { createResponses } from "~/services/copilot/create-responses"
+import { copilotRequestOptions } from "~/services/copilot/request-options"
+import {
+  describeHistoryRecovery,
+  ResponsesUpstreamError,
+} from "~/services/copilot/responses-upstream-error"
 
 import type { ResponseStreamEvent } from "../responses/responses-types"
 
+import { parseNativeResponsesSseData } from "../responses/stream-protocol"
 import {
   type AnthropicMessagesPayload,
   type AnthropicResponse,
-  type AnthropicStreamState,
 } from "./anthropic-types"
+import { streamMessagesFromChat } from "./chat-stream"
 import {
   translateToAnthropic,
   translateToOpenAI,
@@ -31,15 +36,20 @@ import {
 import {
   createResponsesToAnthropicState,
   translateResponsesEventToAnthropicEvents,
+  translateResponsesFailureToAnthropicEvents,
 } from "./responses-stream-translation"
 import {
   translateAnthropicToResponses,
   translateResponsesToAnthropic,
 } from "./responses-translation"
-import { translateChunkToAnthropicEvents } from "./stream-translation"
+import {
+  withMessagesUsage,
+  type MessagesUsageDiagnostics,
+} from "./usage-diagnostics"
+import { readMessagesUsage } from "./usage-translation"
 
 export async function handleCompletion(c: Context) {
-  await checkRateLimit(state)
+  await checkRateLimit(state, c.req.raw.signal)
 
   let anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
@@ -67,7 +77,9 @@ export async function handleCompletion(c: Context) {
     return handlePassthroughMessages(c, anthropicPayload)
   }
   if (egress === "/responses") {
-    return handleCompletionViaResponses(c, anthropicPayload)
+    return withMessagesUsage("responses", (diagnostics) =>
+      handleCompletionViaResponses(c, anthropicPayload, diagnostics),
+    )
   }
   if (egress === "unsupported") {
     return c.json(
@@ -82,6 +94,16 @@ export async function handleCompletion(c: Context) {
     )
   }
 
+  return withMessagesUsage("chat", (diagnostics) =>
+    handleCompletionViaChat(c, anthropicPayload, diagnostics),
+  )
+}
+
+async function handleCompletionViaChat(
+  c: Context,
+  anthropicPayload: AnthropicMessagesPayload,
+  diagnostics: MessagesUsageDiagnostics,
+) {
   // Trace the original Anthropic request
   const traceTimestamp = await traceRequest({
     type: "anthropic",
@@ -102,7 +124,12 @@ export async function handleCompletion(c: Context) {
     await awaitApproval()
   }
 
-  const response = await createChatCompletions(openAIPayload)
+  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const trailerController = new AbortController()
+  const response = await createChatCompletions(openAIPayload, {
+    ...requestOptions,
+    signal: AbortSignal.any([requestOptions.signal, trailerController.signal]),
+  })
 
   if (isNonStreaming(response)) {
     consola.debug(
@@ -110,6 +137,7 @@ export async function handleCompletion(c: Context) {
       JSON.stringify(response).slice(-400),
     )
     const anthropicResponse = translateToAnthropic(response)
+    diagnostics.finish(readMessagesUsage(response.usage, "chat"))
     consola.debug(
       "Translated Anthropic response:",
       JSON.stringify(anthropicResponse),
@@ -126,41 +154,12 @@ export async function handleCompletion(c: Context) {
     return c.json(anthropicResponse)
   }
 
-  consola.debug("Streaming response from Copilot")
-  return streamSSE(c, async (stream) => {
-    const streamState: AnthropicStreamState = {
-      messageStartSent: false,
-      contentBlockIndex: 0,
-      contentBlockOpen: false,
-      toolCalls: {},
-    }
-
-    const streamTracer = new StreamTracer(traceTimestamp)
-
-    for await (const rawEvent of response) {
-      consola.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
-      if (rawEvent.data === "[DONE]") {
-        break
-      }
-
-      if (!rawEvent.data) {
-        continue
-      }
-
-      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-      const events = translateChunkToAnthropicEvents(chunk, streamState)
-
-      for (const event of events) {
-        consola.debug("Translated Anthropic event:", JSON.stringify(event))
-        streamTracer.addChunk({ openai: chunk, anthropic: event })
-        await stream.writeSSE({
-          event: event.type,
-          data: JSON.stringify(event),
-        })
-      }
-    }
-
-    await streamTracer.finish()
+  return streamMessagesFromChat(c, {
+    response,
+    requestOptions,
+    trailerController,
+    traceTimestamp,
+    diagnostics,
   })
 }
 
@@ -188,10 +187,15 @@ async function handlePassthroughMessages(
 
   if (state.manualApprove) await awaitApproval()
 
-  const response = await createMessages(payload, {
-    anthropicVersion: c.req.header("anthropic-version"),
-    anthropicBeta: c.req.header("anthropic-beta"),
-  })
+  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const response = await createMessages(
+    payload,
+    {
+      anthropicVersion: c.req.header("anthropic-version"),
+      anthropicBeta: c.req.header("anthropic-beta"),
+    },
+    requestOptions,
+  )
 
   if (isMessagesNonStreaming(response)) {
     consola.debug(
@@ -207,22 +211,25 @@ async function handlePassthroughMessages(
 
   consola.debug("Streaming passthrough response from Copilot")
   return streamSSE(c, async (stream) => {
+    stream.onAbort(requestOptions.abort)
     const streamTracer = new StreamTracer(traceTimestamp)
 
-    for await (const rawEvent of response) {
-      consola.debug("Copilot raw messages event:", JSON.stringify(rawEvent))
-      if (rawEvent.data === "[DONE]") break
-      if (!rawEvent.data) continue
+    try {
+      for await (const rawEvent of response) {
+        consola.debug("Copilot raw messages event:", JSON.stringify(rawEvent))
+        if (rawEvent.data === "[DONE]") break
+        if (!rawEvent.data) continue
 
-      streamTracer.addChunk(rawEvent)
-      // Forward the native Anthropic SSE frame unchanged.
-      await stream.writeSSE({
-        event: rawEvent.event,
-        data: rawEvent.data,
-      })
+        streamTracer.addChunk(rawEvent)
+        // Forward the native Anthropic SSE frame unchanged.
+        await stream.writeSSE({
+          event: rawEvent.event,
+          data: rawEvent.data,
+        })
+      }
+    } finally {
+      await streamTracer.finish()
     }
-
-    await streamTracer.finish()
   })
 }
 
@@ -242,6 +249,7 @@ const isMessagesNonStreaming = (
 async function handleCompletionViaResponses(
   c: Context,
   payload: AnthropicMessagesPayload,
+  diagnostics: MessagesUsageDiagnostics,
 ) {
   consola.info(
     `[Anthropic→Responses] Using model: "${payload.model}" (responses bridge)`,
@@ -257,13 +265,15 @@ async function handleCompletionViaResponses(
 
   if (state.manualApprove) await awaitApproval()
 
-  const response = await createResponses(responsesPayload)
+  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const response = await createResponses(responsesPayload, requestOptions)
 
   if (isResponsesNonStreaming(response)) {
     const anthropicResponse = translateResponsesToAnthropic(
       response,
       payload.model,
     )
+    diagnostics.finish(readMessagesUsage(response.usage, "responses"))
     await traceResponse(
       {
         type: "anthropic-via-responses",
@@ -277,21 +287,15 @@ async function handleCompletionViaResponses(
 
   consola.debug("Streaming response via Responses bridge")
   return streamSSE(c, async (stream) => {
+    stream.onAbort(requestOptions.abort)
     const streamState = createResponsesToAnthropicState(payload.model)
     const streamTracer = new StreamTracer(traceTimestamp)
-
-    for await (const rawEvent of response) {
-      if (rawEvent.data === "[DONE]") break
-      if (!rawEvent.data) continue
-
-      const responsesEvent = JSON.parse(rawEvent.data) as ResponseStreamEvent
-      const events = translateResponsesEventToAnthropicEvents(
-        responsesEvent,
+    const fail = async (message: string) => {
+      for (const event of translateResponsesFailureToAnthropicEvents(
+        message,
         streamState,
-      )
-
-      for (const event of events) {
-        streamTracer.addChunk({ responses: responsesEvent, anthropic: event })
+      )) {
+        streamTracer.addChunk({ anthropic: event })
         await stream.writeSSE({
           event: event.type,
           data: JSON.stringify(event),
@@ -299,7 +303,44 @@ async function handleCompletionViaResponses(
       }
     }
 
-    await streamTracer.finish()
+    try {
+      for await (const rawEvent of response) {
+        if (rawEvent.data === "[DONE]") break
+        if (!rawEvent.data) continue
+
+        const responsesEvent = parseNativeResponsesSseData(
+          rawEvent.data,
+        ) as unknown as ResponseStreamEvent
+        const events = translateResponsesEventToAnthropicEvents(
+          responsesEvent,
+          streamState,
+        )
+
+        for (const event of events) {
+          streamTracer.addChunk({ responses: responsesEvent, anthropic: event })
+          await stream.writeSSE({
+            event: event.type,
+            data: JSON.stringify(event),
+          })
+        }
+        if (streamState.terminalSeen) break
+      }
+      if (!requestOptions.signal.aborted && !streamState.terminalSeen)
+        await fail("Upstream Responses stream ended before a terminal event.")
+    } catch (error) {
+      if (!requestOptions.signal.aborted) {
+        const message = error instanceof Error ? error.message : String(error)
+        await fail(
+          message
+            + (error instanceof ResponsesUpstreamError ?
+              describeHistoryRecovery(error.recovery)
+            : ""),
+        )
+      }
+    } finally {
+      diagnostics.finish(streamState.usage)
+      await streamTracer.finish()
+    }
   })
 }
 

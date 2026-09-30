@@ -228,9 +228,13 @@ async function refreshCopilotToken(): Promise<void> {
   consola.debug("VS Code proxy not available or returned no token")
 
   // Attempt 4: validate whether the GitHub token itself is still good
+  await validateGitHubTokenAfterRefresh()
+}
+
+async function validateGitHubTokenAfterRefresh(): Promise<void> {
   consola.warn("Validating GitHub token against /user endpoint...")
   try {
-    const user = await getGitHubUser()
+    const user = await getGitHubUser(AbortSignal.timeout(10_000))
     consola.info(
       `GitHub token is still valid (user: ${user.login}). `
         + `Copilot endpoint may be temporarily unavailable.`,
@@ -241,17 +245,24 @@ async function refreshCopilotToken(): Promise<void> {
       `Will retry in ${retryDelay}s (failure #${consecutiveFailures})`,
     )
     scheduleRefresh(retryDelay)
-  } catch {
+  } catch (error) {
     consecutiveFailures++
     const retryDelay = getRetryDelay()
+    if (!(error instanceof HTTPError) || error.response.status !== 401) {
+      consola.warn(
+        `GitHub validation unavailable, will retry in ${retryDelay}s`,
+      )
+      scheduleRefresh(retryDelay)
+      return
+    }
     consola.error(
       "GitHub token is invalid. Please re-authenticate.\n"
         + `  Run: re-auth.cmd\n`
         + `  Will keep retrying every ${retryDelay}s in case token is refreshed externally.`,
     )
-    // eslint-disable-next-line require-atomic-updates -- intentional clear of stale token
+
     state.copilotToken = undefined
-    // eslint-disable-next-line require-atomic-updates -- intentional clear of stale expiry
+
     state.copilotTokenExpiresAt = undefined
     scheduleRefresh(retryDelay)
   }
@@ -292,9 +303,12 @@ export async function ensureCopilotToken(force = false): Promise<void> {
   // After the refresh attempt, verify we actually have a valid token.
   // If refreshCopilotToken failed and cleared the token, throw so the
   // caller can return an error to the client instead of silently proceeding.
-  if (!state.copilotToken) {
+  if (
+    !state.copilotToken
+    || (state.copilotTokenExpiresAt ?? 0) <= Math.floor(Date.now() / 1000)
+  ) {
     throw new Error(
-      "Copilot token refresh failed. GitHub token may be invalid — re-authenticate.",
+      "Copilot token refresh failed: no unexpired Copilot credential is available.",
     )
   }
 }

@@ -17,8 +17,9 @@ import {
 } from "~/routes/_shared/encrypted-content"
 import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
 
-import type { CopilotRequestOptions } from "./create-chat-completions"
+import type { CopilotRequestOptions } from "./request-options"
 
+import { applyForeignReasoningPolicy } from "./foreign-reasoning"
 import { requestResponsesWithHistoryRecovery } from "./responses-history-recovery"
 
 /**
@@ -36,12 +37,15 @@ export const createResponses = async (
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
 
-  const compatible = rewriteCollaborationForCopilot(
-    sanitizeReasoningItems(
-      stripEncryptedContentParts(
-        normalizeToolDescriptions(normalizeReasoningEffort(payload)),
+  const compatible = await applyForeignReasoningPolicy(
+    rewriteCollaborationForCopilot(
+      sanitizeReasoningItems(
+        stripEncryptedContentParts(
+          normalizeToolDescriptions(normalizeReasoningEffort(payload)),
+        ),
       ),
     ),
+    options.signal,
   )
   const { payload: body, summary: cachePolicy } = applyResponsesCachePolicy(
     compatible,

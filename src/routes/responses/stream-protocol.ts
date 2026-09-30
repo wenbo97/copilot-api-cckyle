@@ -1,6 +1,7 @@
 import type { ChatCompletionChunk } from "~/services/copilot/create-chat-completions"
 
 import type {
+  ResponseError,
   ResponseObject,
   ResponseOutputContent,
   ResponseOutputItem,
@@ -120,7 +121,10 @@ export class NativeResponsesStreamTracker {
     }
   }
 
-  fail(message: string): Array<NativeResponsesSseEvent> {
+  fail(
+    message: string,
+    detail?: Omit<ResponseError, "message">,
+  ): Array<NativeResponsesSseEvent> {
     if (this.terminal) return []
     this.terminal = true
 
@@ -129,9 +133,9 @@ export class NativeResponsesStreamTracker {
         {
           type: "error",
           sequence_number: this.takeSequenceNumber(),
-          code: "invalid_upstream_response",
+          code: detail?.code ?? "invalid_upstream_response",
           message,
-          param: null,
+          param: detail?.param ?? null,
         },
       ]
     }
@@ -143,10 +147,10 @@ export class NativeResponsesStreamTracker {
       output,
       incomplete_details: null,
       error: {
-        code: "invalid_upstream_response",
-        type: "server_error",
+        code: detail?.code ?? "invalid_upstream_response",
+        type: detail?.type ?? "server_error",
         message,
-        param: null,
+        param: detail?.param ?? null,
       },
     }
     return [

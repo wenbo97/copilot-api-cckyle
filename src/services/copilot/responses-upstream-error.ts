@@ -1,18 +1,47 @@
 const OWNERSHIP_MESSAGE = "input item does not belong to this connection"
 
+export interface HistoryRecoverySummary {
+  attempted: boolean
+  removed: number
+  disabledReason?: string
+}
+
+export function describeHistoryRecovery(
+  recovery?: HistoryRecoverySummary,
+): string {
+  if (!recovery) return ""
+  const action =
+    recovery.attempted ? "attempted once on a retry copy" : "not attempted"
+  const disabled =
+    recovery.disabledReason ?
+      ` automatic recovery disabled: ${recovery.disabledReason}.`
+    : ""
+  return ` History recovery ${action}; removed=${recovery.removed}.${disabled}`
+}
+
 export class ResponsesUpstreamError extends Error {
   readonly status: number
   readonly code: string
+  readonly param?: string
+  recovery?: HistoryRecoverySummary
 
-  constructor(status: number, message: string, code = "upstream_error") {
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.name = "ResponsesUpstreamError"
     this.status = status
-    this.code = code
+    this.code =
+      code
+      || (this.isHistoryOwnershipError ?
+        "copilot_input_connection_mismatch"
+      : "upstream_error")
+    if (this.isHistoryOwnershipError) this.param = "input"
   }
 
   get isHistoryOwnershipError(): boolean {
-    return this.status === 401 && this.message === OWNERSHIP_MESSAGE
+    return (
+      this.status === 401
+      && this.message.trim().toLowerCase() === OWNERSHIP_MESSAGE
+    )
   }
 }
 
@@ -69,8 +98,6 @@ export function responsesUpstreamError(
   return new ResponsesUpstreamError(
     effectiveStatus,
     message,
-    typeof error.code === "string" && error.code ?
-      error.code
-    : "upstream_error",
+    typeof error.code === "string" && error.code ? error.code : undefined,
   )
 }

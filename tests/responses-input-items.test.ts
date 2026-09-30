@@ -86,7 +86,7 @@ describe("translateToOpenAI: items Chat Completions cannot express", () => {
           type: "message",
           role: "user",
           content: [
-            { type: "input_text", text: "what colour?" },
+            { type: "input_text", text: "what color?" },
             {
               type: "input_image",
               image_url: "data:image/png;base64,AAA",
@@ -98,7 +98,7 @@ describe("translateToOpenAI: items Chat Completions cannot express", () => {
     } as unknown as ResponsesPayload)
 
     expect(out.messages[0].content).toEqual([
-      { type: "text", text: "what colour?" },
+      { type: "text", text: "what color?" },
       {
         type: "image_url",
         image_url: { url: "data:image/png;base64,AAA", detail: "auto" },

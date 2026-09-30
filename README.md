@@ -107,8 +107,8 @@ set "OPENAI_API_KEY=dummy" && codex -c model_provider="copilotproxyry" -c model_
 
 The proxy resolves a Copilot token in this order:
 
-1. **GitHub token** (`GH_TOKEN` / `--github-token`, or the interactive device-code flow) → exchanged for a Copilot token, then auto-refreshed.
-2. **VS Code token bridge** (fallback, or **proxy-only mode** when no GitHub token is present) — the proxy fetches a token from a small VS Code extension at `http://127.0.0.1:<VSCODE_PROXY_PORT>/token`.
+1. **VS Code token bridge** — startup first tries the extension at `http://127.0.0.1:<VSCODE_PROXY_PORT>/token`. A successful exchange skips GitHub authentication, including when a GitHub token was supplied.
+2. **GitHub token** (`GH_TOKEN` / `--github-token`, stored credentials, or the interactive device-code flow) — used if the bridge is unavailable, then exchanged for an automatically refreshed Copilot token. A failed GitHub exchange can also fall back to the bridge.
 
 ### Setting up the VS Code token bridge
 
@@ -137,7 +137,7 @@ Copy `.env.example` to `.env`. Fork-relevant keys:
 | `COPILOT_STREAM_IDLE_TIMEOUT_MS` | Optional Responses upstream SSE inactivity deadline; all SSE activity resets it. | disabled |
 | `COPILOT_TOTAL_TIMEOUT_MS` | Optional total Responses upstream stream deadline. | disabled |
 | `TRACE_OUTPUT_FOLDER` | Where request/response traces go when `--trace` is set. | `./traces` |
-| `COPILOT_CACHE_DIAGNOSTICS` | Set to `1` or `true` for native Responses cache/usage summaries in the proxy log. | disabled |
+| `COPILOT_CACHE_DIAGNOSTICS` | Set to `1` or `true` for Responses cache summaries and separate Messages bridge usage diagnostics. | disabled |
 | `COPILOT_CACHE_POLICY` | `prefix-v1` enables the experimental native Responses prefix policy; `off` disables it. | `off` |
 | `COPILOT_CACHE_NAMESPACE` | Stable per-account/workspace scope used only to generate a missing cache key. | none |
 
@@ -221,7 +221,9 @@ miss merely because it is absent.
 
 For a token-weighted cache hit rate, divide the sum of `cached_input_tokens`
 by the sum of `input_tokens` over the same `usage_complete=true` samples.
-Also report the fraction of requests with complete usage. Keep results grouped
+Here `usage_complete` means input and cache-read counts are both known; it
+does not guarantee output usage or all retry attempts were observed.
+Also report the fraction of records with known values for each metric. Keep results grouped
 by model; cache hit rate alone does not establish a reduction in task cost.
 Copilot-reported nano-AIU is not an independently verified account deduction.
 
@@ -241,19 +243,137 @@ This initial observer covers native Responses only, including Messages requests
 that use that egress. It does not yet provide cross-turn history comparisons or
 a complete per-task cost report.
 
+#### Messages bridge usage
+
+Messages clients using Chat or Responses upstream receive reported cache reads
+in both JSON and SSE responses. The bridge subtracts a valid cached-read count
+from a known input total; final streamed usage replaces provisional counters
+with cumulative values. Native Messages responses remain unchanged.
+
+Missing or invalid usage remains unknown internally. Required Anthropic numeric
+fields use compatibility placeholders when no measurement exists, while unknown
+optional cache fields are omitted. A known input total without a valid cached
+count is a compatibility fallback, not a measured uncached-input breakdown.
+Copilot cache-write counters are not mapped to Anthropic cache creation because
+their accounting contract has not been established for this bridge.
+
+With `COPILOT_CACHE_DIAGNOSTICS=1`, at most one separate `[messages-usage]`
+summary records the upstream protocol, known counters, completeness, and fallback
+reasons for each translated request. It contains no prompt or tool arguments.
+These summaries are not consumed by `usage:summary`; adding them to native
+Responses records would double-count Messages requests using that egress.
+Compatibility placeholders must not be interpreted as zero usage or billing.
+
+Chat-backed Messages streams request usage and wait after the finish reason for
+a valid usage trailer, `[DONE]`, or normal EOF. A normal close with missing usage
+retains the answer. A stalled trailer has a five-second deadline; protocol errors,
+network failures, or timeout produce an error rather than a successful stop.
+Client cancellation aborts the upstream without synthesizing a terminal result.
+
+#### Summarize saved diagnostics
+
+From the repository directory, run:
+
+```powershell
+bun run usage:summary
+bun run usage:summary tmps/cache-session.log --since "2026-09-29T00:00:00+08:00" --until "2026-09-30T00:00:00+08:00"
+bun run usage:summary tmps/cache-session.log --json
+```
+
+The default input is `tmps/cache-session.log`. The command reads UTF-8 and
+BOM-marked UTF-16LE logs without making network requests. It reports observed
+usage, per-metric coverage, outcome counts, attempts, retries, and token-weighted
+cache hit rates, overall and by model. These are native Responses egress records
+(including Messages using that egress), not all incoming requests or complete
+task costs. Earlier attempts may have unreported usage; nano-AIU is not proof
+of an account deduction. Reasoning and cached tokens are details, not additional
+tokens to add to their respective output/input totals.
+
+Time filters require ISO8601 timestamps with a timezone; the interval includes
+`--since` and excludes `--until`. Without filters the whole file is analyzed.
+Records without a timestamp are counted, and excluded when a filter is active.
+Within the selected range, duplicate request IDs keep their last valid record.
+Malformed summaries are skipped and counted; unrelated debug payloads are not
+included in the output. Empty results return success with unknown metrics;
+unreadable files and invalid arguments exit nonzero.
+
+JSON output has `schema_version: 1`, `scope`, `period`, `overall`, `by_model`,
+`parsing`, and `limitations`. Each metric includes `observed_sum`, `known_records`,
+and `coverage`; absent values remain `null` and actual zero remains zero.
+Integer sums larger than JavaScript's safe integer range are decimal strings.
+
 ### Responses history rejected by Copilot
 
 Copilot can return HTTP 401 with the exact message
 `input item does not belong to this connection`. The proxy reports this known
-history rejection as HTTP 400 with code `copilot_input_connection_mismatch`
-and `param: "input"`, without refreshing authentication or automatically
-replaying the rejected request. Ordinary authentication 401s still receive at
-most one refresh and retry.
+history rejection as an upstream error, preserving HTTP 401 and the upstream
+error code (or `copilot_input_connection_mismatch` when absent), with
+`param: "input"`. It does not refresh authentication for this rejection.
+Before any Responses event is forwarded, the proxy may retry once after removing
+only unregistered reasoning ciphertext from a retry copy. Visible history and
+registered ciphertext remain intact. Ordinary authentication 401s still receive
+at most one authentication refresh and retry.
 
-This classification prevents an unhelpful auth retry; it does not repair the
-rejected history or establish why Copilot rejected it. Check that the history
-belongs to the current account and endpoint, or start a new conversation. The
-proxy preserves history items, reasoning ciphertext, and cache parameters.
+Failed recovery retains the final upstream status and cause, and states whether
+recovery was attempted and how many ciphertext fields were removed from the
+retry copy. Registry problems disable recovery without replacing the upstream
+cause. Once SSE starts, failures use the existing error/failure events; the
+already-sent HTTP status cannot change. No history replay occurs after an event
+has been forwarded.
+
+For **operator-confirmed OpenAI-origin reasoning**, an optional
+`COPILOT_FOREIGN_REASONING_MANIFEST` file identifies exact ciphertext SHA-256
+digests to omit from the outgoing copy before the first attempt. Generate a
+reviewable manifest with
+`bun scripts/export-foreign-reasoning.ts <OpenAI-rollout.jsonl> <new-manifest.json>`,
+then set that environment variable only on the intended proxy process. Source
+rollouts are never edited. A receipt miss alone is insufficient: unlisted
+ciphertext and current-upstream receipts remain intact. Summaries, item IDs,
+visible messages and tool pairs are preserved. Invalid manifests or unhealthy
+receipts stop matching requests before provider I/O. Ordinary HTTP 400 errors
+do not trigger cleanup or an extra retry. This policy is off when unset;
+generation of a manifest does not activate it. Verify the source provider and
+any mixed-provider history before enabling the manifest.
+
+Canceling a request also cancels its wait for authentication, while other callers
+can continue sharing the refresh. Each GitHub token exchange and refresh-time
+GitHub user validation has a separate 10-second deadline, including body reads;
+the VS Code Bridge retains its 3-second deadline. Authentication retry counts
+are unchanged, so a full refresh can take longer than one exchange deadline.
+
+### Fallback compatibility and request termination
+
+Responses-to-Chat fallback groups consecutive function calls into one assistant
+tool-call turn, retaining call IDs and result order. Text-only tool-result arrays
+are translated to Chat text parts. Image/file or mixed tool results return HTTP
+400 with `unsupported_feature` and the failing input path before an upstream
+request is sent. Native Responses bypasses this fallback restriction.
+
+Streaming fallback requests Chat usage explicitly and waits after `finish_reason`
+for a usage frame, `[DONE]`, or normal EOF before emitting the final Responses
+event. Content is streamed as it arrives. A missing `finish_reason`, malformed
+tail, network error, or configured timeout still fails the stream. Missing usage
+fields are omitted, not zero-filled; observed zero remains zero. Streaming and
+non-streaming fallback map cached input and reasoning output details without
+adding them again to token totals. `usage:summary` still covers only native
+Responses egress diagnostics, not fallback requests.
+
+All Responses, Chat, and Messages generation routes propagate caller cancellation
+to the upstream request; closing a downstream SSE reader also aborts upstream
+work. They share `COPILOT_HEADER_TIMEOUT_MS` (60 seconds by default; `0` disables)
+and optional `COPILOT_FIRST_EVENT_TIMEOUT_MS`, `COPILOT_STREAM_IDLE_TIMEOUT_MS`,
+and `COPILOT_TOTAL_TIMEOUT_MS` (unset or `0` disables). The stream timers apply
+to streaming requests. Authentication refresh remains shared between callers.
+
+The Messages-to-Responses bridge closes open content blocks before termination.
+Output-limit truncation maps to `max_tokens`, content filtering to `refusal`, and
+successful tool calls to `tool_use`. Truncation takes precedence over tool calls.
+Failed responses, unknown truncation reasons, and missing or malformed terminal
+events produce an error instead of a successful `message_stop`. Non-streaming
+failures retain a known upstream HTTP status, otherwise 502.
+
+Type checking includes source, tests, scripts, and root configuration files; local
+`dist`, `tmps`, and test run logs are outside the project input set.
 
 For development, `bun run dev:cache` uses `scripts/dev-cache.ts` to start the
 same enterprise server as `dev`. Normal application logs and enabled cache
@@ -265,7 +385,8 @@ Arguments are forwarded, for example `bun run dev:cache --port 4142`.
 Full `--trace` captures remain opt-in. The Windows launcher
 `start-copilot-api.cmd` uses this command.
 Set local cache options in the ignored `.env.local` file;
-the tracked `.env` and standard launcher leave the policy and diagnostics off.
+the tracked `.env` leaves the policy and diagnostics off. The Windows launcher
+explicitly enables `COPILOT_CACHE_DIAGNOSTICS=1`; it does not enable a cache policy.
 
 Use `bun run dev:trace` explicitly when you need full request/response captures
 in `traces/` (or `TRACE_OUTPUT_FOLDER`). Those files contain prompt, history,
@@ -334,6 +455,25 @@ automatically, so a commit will reformat what you are committing.
 >
 > The heavier alternative — a `.gitattributes` with `* text=auto eol=lf` plus a
 > re-checkout — converts the entire working tree to LF instead.
+
+### Budgeted local acceptance
+
+Run `bun run acceptance:local --dry-run` to inspect the OpenAI-only evaluation
+plan, or `bun run acceptance:local` for offline checks. Add `--live` to use the
+VS Code Bridge and an isolated server on port 4143, with per-attempt credit
+reservations and Luna/low as the primary model. Reports distinguish confirmed
+behavior, known defects, environment restrictions, and unverified paths.
+See [the budget, scenarios, continuation rules, and evidence format](tests/acceptance/LOCAL-ACCEPTANCE.md).
+
+Messages requests preserve explicit `output_config.effort` across Responses,
+Chat, and native Messages egress. Explicit effort takes precedence over legacy
+thinking budgets; unsupported values can be reduced to a supported level but
+are never silently increased. Invalid values return a field-specific 400.
+Without explicit effort, the existing budget mapping and upstream defaults apply.
+
+Rate-limit wait mode admits requests in FIFO order at the configured interval.
+Cancelled waiters leave the queue without consuming a future slot. The interval
+controls request admission rather than waiting for the previous response to end.
 
 ### 3. Acceptance matrix — live, drives the real CLIs
 

@@ -9,6 +9,7 @@ import {
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
+// An escaped snowman keeps multibyte encoding coverage with English fixture labels.
 const projectRoot = join(import.meta.dir, "..")
 const directories: Array<string> = []
 
@@ -36,8 +37,8 @@ async function runFixture(directory: string, exitCode = 0) {
     `import consola from "consola"
 import { configureDevLogging } from ${JSON.stringify(loggingModule)}
 configureDevLogging("tmps/cache-session.log")
-consola.info("info 中文")
-consola.debug("debug 中文")
+consola.info("info Unicode \u2603")
+consola.debug("debug Unicode \u2603")
 consola.warn("warning marker")
 consola.error(new Error("error marker"))
 console.log("http access marker")
@@ -68,7 +69,7 @@ test("keeps normal logs on console and appends debug only to the file", async ()
     const result = await runFixture(directory)
     expect(result.code).toBe(0)
     for (const marker of [
-      "info 中文",
+      "info Unicode \u2603",
       "warning marker",
       "error marker",
       "http access marker",
@@ -76,12 +77,12 @@ test("keeps normal logs on console and appends debug only to the file", async ()
       "<-- GET /",
     ])
       expect(result.output).toContain(marker)
-    expect(result.output).not.toContain("debug 中文")
+    expect(result.output).not.toContain("debug Unicode \u2603")
     expect(result.output).not.toContain("console debug marker")
   }
   const log = readFileSync(join(directory, "tmps/cache-session.log"), "utf8")
-  expect(log.match(/info 中文/g)).toHaveLength(2)
-  expect(log.match(/debug 中文/g)).toHaveLength(2)
+  expect(log.match(/info Unicode \u2603/g)).toHaveLength(2)
+  expect(log.match(/debug Unicode \u2603/g)).toHaveLength(2)
   expect(log).toContain("console debug marker")
   expect(log).toContain("http access marker")
   expect(log).toContain("error marker")
@@ -96,13 +97,13 @@ test("preserves old UTF-16LE logs and flushes a nonzero exit", async () => {
   const directory = createWorkspace()
   mkdirSync(join(directory, "tmps"))
   const logPath = join(directory, "tmps/cache-session.log")
-  writeFileSync(logPath, "\uFEFF已有日志\n", "utf16le")
+  writeFileSync(logPath, "\uFEFFexisting log \u2603\n", "utf16le")
   const result = await runFixture(directory, 7)
   expect(result.code).toBe(7)
   const log = readFileSync(logPath, "utf16le")
-  expect(log).toStartWith("\uFEFF已有日志\n")
-  expect(log).toContain("info 中文")
-  expect(log).toContain("debug 中文")
+  expect(log).toStartWith("\uFEFFexisting log \u2603\n")
+  expect(log).toContain("info Unicode \u2603")
+  expect(log).toContain("debug Unicode \u2603")
   expect(log).toContain('[cache-diagnostics] {"cached_input_tokens":42}')
 })
 

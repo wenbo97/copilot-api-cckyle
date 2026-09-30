@@ -1,4 +1,4 @@
-import { mapThinkingToReasoningEffort } from "~/routes/_shared/reasoning-policy"
+import { resolveMessagesReasoningEffort } from "~/routes/_shared/reasoning-policy"
 import { truncateToolName } from "~/routes/_shared/tool-name"
 import {
   type ChatCompletionResponse,
@@ -24,6 +24,7 @@ import {
   type AnthropicUserContentBlock,
   type AnthropicUserMessage,
 } from "./anthropic-types"
+import { formatMessagesUsage, readMessagesUsage } from "./usage-translation"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 // Payload translation
@@ -43,15 +44,13 @@ export function translateToOpenAI(
     max_tokens: payload.max_tokens,
     stop: payload.stop_sequences,
     stream: payload.stream,
+    stream_options: payload.stream ? { include_usage: true } : undefined,
     temperature: payload.temperature,
     top_p: payload.top_p,
     user: payload.metadata?.user_id,
     tools: translateAnthropicToolsToOpenAI(payload.tools),
     tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
-    reasoning_effort: mapThinkingToReasoningEffort(
-      payload.thinking,
-      payload.max_tokens,
-    ),
+    reasoning_effort: resolveMessagesReasoningEffort(payload),
   }
 }
 
@@ -362,17 +361,7 @@ export function translateToAnthropic(
     content: [...allTextBlocks, ...allToolUseBlocks],
     stop_reason: mapOpenAIStopReasonToAnthropic(stopReason),
     stop_sequence: null,
-    usage: {
-      input_tokens:
-        (response.usage?.prompt_tokens ?? 0)
-        - (response.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-      output_tokens: response.usage?.completion_tokens ?? 0,
-      ...(response.usage?.prompt_tokens_details?.cached_tokens
-        !== undefined && {
-        cache_read_input_tokens:
-          response.usage.prompt_tokens_details.cached_tokens,
-      }),
-    },
+    usage: formatMessagesUsage(readMessagesUsage(response.usage, "chat")),
   }
 }
 

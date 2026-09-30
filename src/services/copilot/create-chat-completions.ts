@@ -1,13 +1,9 @@
-import type { CopilotStreamTimeouts } from "./stream-lifecycle"
+import type { CopilotRequestOptions } from "./request-options"
+
+export type { CopilotRequestOptions } from "./request-options"
 
 import { copilotFetch } from "./copilot-fetch"
 import { CopilotStreamLifecycle } from "./stream-lifecycle"
-
-export interface CopilotRequestOptions {
-  signal?: AbortSignal
-  headerTimeoutMs?: number
-  streamTimeouts?: CopilotStreamTimeouts
-}
 
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
@@ -61,18 +57,7 @@ export interface ChatCompletionChunk {
   model: string
   choices: Array<Choice>
   system_fingerprint?: string
-  usage?: {
-    prompt_tokens: number
-    completion_tokens: number
-    total_tokens: number
-    prompt_tokens_details?: {
-      cached_tokens: number
-    }
-    completion_tokens_details?: {
-      accepted_prediction_tokens: number
-      rejected_prediction_tokens: number
-    }
-  }
+  usage?: ChatUsage | null
 }
 
 interface Delta {
@@ -107,14 +92,7 @@ export interface ChatCompletionResponse {
   model: string
   choices: Array<ChoiceNonStreaming>
   system_fingerprint?: string
-  usage?: {
-    prompt_tokens: number
-    completion_tokens: number
-    total_tokens: number
-    prompt_tokens_details?: {
-      cached_tokens: number
-    }
-  }
+  usage?: ChatUsage | null
 }
 
 interface ResponseMessage {
@@ -236,5 +214,17 @@ export interface ImagePart {
   image_url: {
     url: string
     detail?: "low" | "high" | "auto"
+  }
+}
+
+export interface ChatUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number }
+  completion_tokens_details?: {
+    reasoning_tokens?: number
+    accepted_prediction_tokens?: number
+    rejected_prediction_tokens?: number
   }
 }

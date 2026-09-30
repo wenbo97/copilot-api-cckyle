@@ -4,7 +4,16 @@ import type {
   ResponseObject,
   ResponseStreamEvent,
 } from "../responses/responses-types"
-import type { AnthropicStreamEventData } from "./anthropic-types"
+import type {
+  AnthropicResponse,
+  AnthropicStreamEventData,
+} from "./anthropic-types"
+
+import {
+  formatMessagesUsage,
+  readMessagesUsage,
+  type MessagesUsage,
+} from "./usage-translation"
 
 // =============================================================================
 // OpenAI Responses stream  ->  Anthropic Messages stream
@@ -16,6 +25,8 @@ import type { AnthropicStreamEventData } from "./anthropic-types"
 // =============================================================================
 
 export interface ResponsesToAnthropicStreamState {
+  usage?: MessagesUsage
+  terminalSeen: boolean
   messageStartSent: boolean
   model: string
   responseId: string
@@ -34,6 +45,7 @@ export function createResponsesToAnthropicState(
   model: string,
 ): ResponsesToAnthropicStreamState {
   return {
+    terminalSeen: false,
     messageStartSent: false,
     model,
     responseId: "",
@@ -48,6 +60,13 @@ export function translateResponsesEventToAnthropicEvents(
   state: ResponsesToAnthropicStreamState,
 ): Array<AnthropicStreamEventData> {
   const events: Array<AnthropicStreamEventData> = []
+  if (state.terminalSeen) return events
+  if ("response" in event)
+    state.usage = readMessagesUsage(
+      event.response.usage,
+      "responses",
+      state.usage,
+    )
 
   switch (event.type) {
     case "response.created":
@@ -98,16 +117,17 @@ export function translateResponsesEventToAnthropicEvents(
       break
     }
 
-    case "response.completed": {
-      emitFinish(event.response, state, events)
+    case "response.completed":
+    case "response.incomplete":
+    case "response.failed": {
+      emitFinish(event, state, events)
       break
     }
 
     case "error": {
-      events.push({
-        type: "error",
-        error: { type: "api_error", message: event.message },
-      })
+      events.push(
+        ...translateResponsesFailureToAnthropicEvents(event.message, state),
+      )
       break
     }
 
@@ -118,6 +138,18 @@ export function translateResponsesEventToAnthropicEvents(
     }
   }
 
+  return events
+}
+
+export function translateResponsesFailureToAnthropicEvents(
+  message: string,
+  state: ResponsesToAnthropicStreamState,
+): Array<AnthropicStreamEventData> {
+  if (state.terminalSeen) return []
+  state.terminalSeen = true
+  const events: Array<AnthropicStreamEventData> = []
+  for (const info of Object.values(state.items)) closeBlock(info, events)
+  events.push({ type: "error", error: { type: "api_error", message } })
   return events
 }
 
@@ -178,10 +210,35 @@ function handleOutputItemAdded(
 }
 
 function emitFinish(
-  response: ResponseObject,
+  event: { type: string; response: ResponseObject },
   state: ResponsesToAnthropicStreamState,
   events: Array<AnthropicStreamEventData>,
 ): void {
+  const { response, type: terminalType } = event
+  if (terminalType !== `response.${response.status}`) {
+    events.push(
+      ...translateResponsesFailureToAnthropicEvents(
+        response.error?.message
+          ?? "Upstream Responses terminal event disagrees with its response status.",
+        state,
+      ),
+    )
+    return
+  }
+  let stopReason: AnthropicResponse["stop_reason"]
+  try {
+    stopReason = deriveAnthropicStopReason(state.sawToolCall, response)
+  } catch (error) {
+    events.push(
+      ...translateResponsesFailureToAnthropicEvents(
+        error instanceof Error ? error.message : String(error),
+        state,
+      ),
+    )
+    return
+  }
+  emitMessageStart(response, state, events)
+  state.terminalSeen = true
   // Safety: close any still-open blocks before finishing.
   for (const info of Object.values(state.items)) {
     closeBlock(info, events)
@@ -190,15 +247,12 @@ function emitFinish(
     {
       type: "message_delta",
       delta: {
-        stop_reason: deriveAnthropicStopReason(
-          state.sawToolCall,
-          response.status,
-        ),
+        stop_reason: stopReason,
         stop_sequence: null,
       },
-      usage: {
-        output_tokens: response.usage?.output_tokens ?? 0,
-      },
+      usage: formatMessagesUsage(
+        state.usage ?? readMessagesUsage(undefined, "responses"),
+      ),
     },
     { type: "message_stop" },
   )
@@ -223,7 +277,7 @@ function emitMessageStart(
       stop_reason: null,
       stop_sequence: null,
       usage: {
-        input_tokens: response.usage?.input_tokens ?? 0,
+        ...formatMessagesUsage(readMessagesUsage(response.usage, "responses")),
         output_tokens: 0,
       },
     },

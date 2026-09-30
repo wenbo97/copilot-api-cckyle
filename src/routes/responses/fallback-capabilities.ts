@@ -229,7 +229,12 @@ function validateInput(
     if (cacheError) return cacheError
 
     if (REPLAY_ITEM_TYPES.has(type)) continue
-    if (type === "function_call" || type === "function_call_output") continue
+    if (type === "function_call") continue
+    if (type === "function_call_output") {
+      const outputError = validateToolOutput(payload, item.output, itemIndex)
+      if (outputError) return outputError
+      continue
+    }
     if (!MESSAGE_ITEM_TYPES.has(type))
       return fail(payload, `input[${itemIndex}].type`)
 
@@ -239,6 +244,25 @@ function validateInput(
       supports,
     })
     if (contentError) return contentError
+  }
+}
+
+function validateToolOutput(
+  payload: ResponsesPayload,
+  output: unknown,
+  itemIndex: number,
+): ResponsesFallbackError | undefined {
+  const param = `input[${itemIndex}].output`
+  if (typeof output === "string") return
+  if (!Array.isArray(output)) return fail(payload, param)
+  for (const [index, part] of output.entries()) {
+    if (
+      !isRecord(part)
+      || part.type !== "input_text"
+      || typeof part.text !== "string"
+    ) {
+      return fail(payload, `${param}[${index}]`)
+    }
   }
 }
 

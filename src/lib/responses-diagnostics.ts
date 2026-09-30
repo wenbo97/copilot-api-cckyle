@@ -6,6 +6,7 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto"
 import type { CachePolicySummary } from "~/lib/responses-cache-policy"
 
 import { HTTPError, InvalidRequestError } from "~/lib/error"
+import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
 
 // Fingerprints can be compared within this process, but cannot be used to
 // dictionary-match prompts against unsalted, persistent content hashes.
@@ -96,6 +97,10 @@ export class ResponsesDiagnostics {
         this.httpStatus = 401
     }
     if (error instanceof HTTPError) this.httpStatus = error.response.status
+    if (error instanceof ResponsesUpstreamError) {
+      this.httpStatus = error.status
+      this.errorCode = error.code
+    }
   }
 
   async *iterate(

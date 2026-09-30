@@ -20,12 +20,29 @@ describe("anthropicToolsToResponses", () => {
         name: "t",
         description: "d",
         parameters: { type: "object" },
+        strict: false,
       },
     ])
   })
   test("undefined/empty -> undefined", () => {
     expect(anthropicToolsToResponses(undefined)).toBeUndefined()
     expect(anthropicToolsToResponses([])).toBeUndefined()
+  })
+
+  test("preserves a caller's explicit strict mode", () => {
+    expect(
+      anthropicToolsToResponses([
+        {
+          name: "t",
+          strict: true,
+          input_schema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ])?.[0],
+    ).toHaveProperty("strict", true)
   })
 
   test("applies 64-char tool-name truncation (T5 wiring)", () => {
@@ -68,15 +85,45 @@ describe("anthropicToolChoiceToResponses", () => {
 })
 
 describe("deriveAnthropicStopReason", () => {
-  test("hasToolCall wins -> tool_use", () => {
-    expect(deriveAnthropicStopReason(true, "incomplete")).toBe("tool_use")
-    expect(deriveAnthropicStopReason(true, "completed")).toBe("tool_use")
+  const response = {
+    id: "resp_test",
+    object: "response" as const,
+    created_at: 1,
+    model: "test",
+    output: [],
+  }
+  test("completed tools are executable, truncated tools are not", () => {
+    expect(
+      deriveAnthropicStopReason(true, { ...response, status: "completed" }),
+    ).toBe("tool_use")
+    expect(
+      deriveAnthropicStopReason(true, {
+        ...response,
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      }),
+    ).toBe("max_tokens")
+    expect(
+      deriveAnthropicStopReason(false, { ...response, status: "completed" }),
+    ).toBe("end_turn")
   })
-  test("incomplete (no tool) -> max_tokens", () => {
-    expect(deriveAnthropicStopReason(false, "incomplete")).toBe("max_tokens")
-  })
-  test("otherwise -> end_turn", () => {
-    expect(deriveAnthropicStopReason(false, "completed")).toBe("end_turn")
-    expect(deriveAnthropicStopReason(false, undefined)).toBe("end_turn")
+  test("content filtering maps to refusal and unknown termination fails", () => {
+    expect(
+      deriveAnthropicStopReason(true, {
+        ...response,
+        status: "incomplete",
+        incomplete_details: { reason: "content_filter" },
+      }),
+    ).toBe("refusal")
+    expect(() =>
+      deriveAnthropicStopReason(false, { ...response, status: "incomplete" }),
+    ).toThrow("unknown incomplete")
+    expect(() =>
+      deriveAnthropicStopReason(true, {
+        ...response,
+        status: "failed",
+        error: { code: "broken", message: "specific cause" },
+      }),
+    ).toThrow("specific cause")
   })
 })

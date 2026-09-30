@@ -7,6 +7,8 @@ export const getCopilotToken = async () => {
     `${GITHUB_API_BASE_URL}/copilot_internal/v2/token`,
     {
       headers: githubHeaders(state),
+      // Independent of any one caller; also bounds response.json().
+      signal: AbortSignal.timeout(10_000),
     },
   )
 

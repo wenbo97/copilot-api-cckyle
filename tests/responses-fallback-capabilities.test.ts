@@ -151,6 +151,88 @@ describe("Responses -> Chat fallback capability matrix", () => {
   })
 })
 
+describe("Responses -> Chat tool output conversion", () => {
+  test("maps text tool outputs and keeps separate replay turns", () => {
+    const request = payload({
+      input: [
+        { type: "function_call", call_id: "a", name: "read", arguments: "{}" },
+        { type: "reasoning", summary: [] },
+        { type: "function_call", call_id: "b", name: "read", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "a",
+          output: [
+            { type: "input_text", text: "first" },
+            { type: "input_text", text: "second" },
+          ],
+        },
+        { type: "function_call_output", call_id: "b", output: "plain" },
+        { role: "user", content: "next" },
+        { type: "function_call", call_id: "c", name: "read", arguments: "{}" },
+      ],
+    })
+    expect(validateResponsesFallback(request)).toBeUndefined()
+    const { messages } = translateToOpenAI(request)
+    expect(messages).toHaveLength(5)
+    expect(messages[0].tool_calls?.map((call) => call.id)).toEqual(["a", "b"])
+    expect(messages[1]).toEqual({
+      role: "tool",
+      tool_call_id: "a",
+      content: [
+        { type: "text", text: "first" },
+        { type: "text", text: "second" },
+      ],
+    })
+    expect(messages[2].content).toBe("plain")
+    expect(messages[4].tool_calls?.map((call) => call.id)).toEqual(["c"])
+  })
+
+  test.each([
+    { type: "input_image", image_url: "https://example.test/image" },
+    { type: "input_file", file_id: "file-test" },
+    { type: "input_text", text: 42 },
+  ])("rejects unsupported tool output before fetching", async (part) => {
+    setChatModel({ vision: true })
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = Object.assign(
+      () => {
+        calls++
+        return Promise.reject(new Error("Unexpected upstream request"))
+      },
+      { preconnect: originalFetch.preconnect },
+    )
+    try {
+      const response = await server.request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          payload({
+            input: [
+              {
+                type: "function_call_output",
+                call_id: "a",
+                output: [{ type: "input_text", text: "keep me" }, part],
+              },
+            ],
+          }),
+        ),
+      })
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: "unsupported_feature",
+          param: "input[0].output[1]",
+        },
+      })
+      expect(calls).toBe(0)
+    } finally {
+      // eslint-disable-next-line require-atomic-updates -- this serial test restores its own fetch fixture
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
 describe("Responses -> Chat fallback rejection and replay rules", () => {
   test.each([
     {

@@ -16,9 +16,10 @@ import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
+import { copilotRequestOptions } from "~/services/copilot/request-options"
 
 export async function handleCompletion(c: Context) {
-  await checkRateLimit(state)
+  await checkRateLimit(state, c.req.raw.signal)
 
   let payload = await c.req.json<ChatCompletionsPayload>()
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
@@ -80,7 +81,8 @@ export async function handleCompletion(c: Context) {
     consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
   }
 
-  const response = await createChatCompletions(payload)
+  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const response = await createChatCompletions(payload, requestOptions)
 
   if (isNonStreaming(response)) {
     consola.debug("Non-streaming response:", JSON.stringify(response))
@@ -91,13 +93,17 @@ export async function handleCompletion(c: Context) {
 
   consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
+    stream.onAbort(requestOptions.abort)
     const streamTracer = new StreamTracer(traceTimestamp)
-    for await (const chunk of response) {
-      consola.debug("Streaming chunk:", JSON.stringify(chunk))
-      streamTracer.addChunk(chunk)
-      await stream.writeSSE(chunk as SSEMessage)
+    try {
+      for await (const chunk of response) {
+        consola.debug("Streaming chunk:", JSON.stringify(chunk))
+        streamTracer.addChunk(chunk)
+        await stream.writeSSE(chunk as SSEMessage)
+      }
+    } finally {
+      await streamTracer.finish()
     }
-    await streamTracer.finish()
   })
 }
 

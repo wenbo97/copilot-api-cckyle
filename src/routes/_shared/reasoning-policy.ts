@@ -1,5 +1,6 @@
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
 
+import { InvalidRequestError } from "~/lib/error"
 import { state } from "~/lib/state"
 
 // Effort ordering, weakest to strongest (moved from endpoint-router.ts). The
@@ -22,6 +23,46 @@ export function isKnownReasoningEffort(
     typeof effort === "string"
     && EFFORT_ORDER.includes(effort as (typeof EFFORT_ORDER)[number])
   )
+}
+
+/** Explicit effort is independent of thinking and takes precedence over budgets. */
+export function resolveMessagesReasoningEffort(
+  payload: AnthropicMessagesPayload,
+): (typeof EFFORT_ORDER)[number] | undefined {
+  const config: unknown = payload.output_config
+  if (
+    config !== undefined
+    && (config === null || typeof config !== "object" || Array.isArray(config))
+  ) {
+    throw new InvalidRequestError(
+      "output_config must be an object.",
+      "invalid_value",
+      "output_config",
+    )
+  }
+  const requested: unknown =
+    config && "effort" in config ? config.effort : undefined
+  if (requested === undefined)
+    return mapThinkingToReasoningEffort(payload.thinking, payload.max_tokens)
+  if (!isKnownReasoningEffort(requested)) {
+    throw new InvalidRequestError(
+      "Unknown output_config.effort.",
+      "invalid_value",
+      "output_config.effort",
+    )
+  }
+  const effective = clampReasoningEffort(payload.model, requested)
+  if (
+    !isKnownReasoningEffort(effective)
+    || EFFORT_ORDER.indexOf(effective) > EFFORT_ORDER.indexOf(requested)
+  ) {
+    throw new InvalidRequestError(
+      `Model ${payload.model} has no supported effort at or below ${requested}.`,
+      "unsupported_value",
+      "output_config.effort",
+    )
+  }
+  return effective
 }
 
 // Budget→effort thresholds (named for clarity; values preserved from the original
@@ -54,10 +95,7 @@ export function mapThinkingToReasoningEffort(
   thinking: AnthropicMessagesPayload["thinking"],
   maxTokens?: number,
 ): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
-  // Guard against absent or non-enabled thinking. `type` is widened to string
-  // before comparison because a client may send "disabled" at runtime even
-  // though the payload type only declares "enabled".
-  if (!thinking || (thinking.type as string) !== "enabled") return undefined
+  if (!thinking || thinking.type !== "enabled") return undefined
   const budget = thinking.budget_tokens
   // thinking enabled but no concrete budget -> backend default tier.
   // typeof guard covers both undefined (per type) and a defensive null.

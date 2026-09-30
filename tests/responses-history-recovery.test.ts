@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -9,8 +10,11 @@ import { server } from "../src/server"
 const originalFetch = globalThis.fetch
 const ownershipMessage = "input item does not belong to this connection"
 let directory: string
+const originalForeignManifest = process.env.COPILOT_FOREIGN_REASONING_MANIFEST
+const children = new Set<Bun.Subprocess>()
 
 beforeEach(async () => {
+  delete process.env.COPILOT_FOREIGN_REASONING_MANIFEST
   directory = await mkdtemp(path.join(os.tmpdir(), "responses-history-test-"))
   Object.assign(state, {
     copilotToken: "test-token",
@@ -29,6 +33,15 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  if (originalForeignManifest === undefined)
+    delete process.env.COPILOT_FOREIGN_REASONING_MANIFEST
+  else process.env.COPILOT_FOREIGN_REASONING_MANIFEST = originalForeignManifest
+  await Promise.all(
+    [...children].map(async (child) => {
+      if (child.exitCode === null) child.kill()
+      await child.exited
+    }),
+  )
   globalThis.fetch = originalFetch
   Object.assign(state, {
     responsesHistoryDirectory: undefined,
@@ -139,6 +152,8 @@ test("ownership failure after the first event is not replayed and retains its st
   expect(output).toContain('"type":"response.failed"')
   expect(output).toContain(ownershipMessage)
   expect(output).toContain("401")
+  expect(output).toContain('"code":"copilot_input_connection_mismatch"')
+  expect(output).toContain("not attempted")
 })
 
 test("repeated ownership failure stops after one recovery attempt", async () => {
@@ -150,6 +165,7 @@ test("repeated ownership failure stops after one recovery attempt", async () => 
   const output = await (await request([oldReasoning()])).text()
   expect(calls).toBe(2)
   expect(output).toContain(ownershipMessage)
+  expect(output).toContain("removed=1")
   expect(output).not.toContain('"type":"response.completed"')
 })
 
@@ -189,6 +205,8 @@ test("receipt write failure disables cleanup while keeping healthy responses usa
   const output = await (await request([oldReasoning()])).text()
   expect(calls).toBe(1)
   expect(output).toContain("automatic recovery disabled")
+  expect(output).toContain(ownershipMessage)
+  expect(output).toContain("401")
 })
 
 test("client cancellation prevents an ownership-recovery request", async () => {
@@ -264,6 +282,37 @@ test("normal authorization errors in SSE do not discard historical state", async
   expect(calls).toBe(1)
   expect(output).toContain("token expired")
 })
+
+test.each([false, true])(
+  "recovery preserves a different final upstream failure (sse=%s)",
+  async (firstSse) => {
+    let calls = 0
+    installFetch(() => {
+      calls++
+      if (calls === 1)
+        return firstSse ? ownershipSse() : (
+            Response.json(
+              { error: { message: ownershipMessage } },
+              { status: 401 },
+            )
+          )
+      return Response.json(
+        {
+          error: { message: "capacity unavailable", code: "capacity_exceeded" },
+        },
+        { status: 503 },
+      )
+    })
+    const response = await request([oldReasoning()])
+    const output = await response.text()
+    expect(calls).toBe(2)
+    expect(response.status).toBe(firstSse ? 200 : 503)
+    expect(output).toContain("capacity unavailable")
+    expect(output).toContain("capacity_exceeded")
+    expect(output).toContain("removed=1")
+    if (firstSse) expect(output).toContain("503")
+  },
+)
 
 test("a rate limit and a network failure never trigger historical cleanup", async () => {
   for (const failure of ["rate-limit", "network"]) {
@@ -348,7 +397,7 @@ test("a new process resumes without dropping previously registered state", async
   expect(resumed.exitCode).toBe(0)
   expect(resumed.output).toContain('"retained":true')
   expect(resumed.output).toContain('"requests":2')
-})
+}, 30_000)
 
 test("concurrent processes register independent receipts without overwriting one another", async () => {
   const issued = await Promise.all([
@@ -361,7 +410,7 @@ test("concurrent processes register independent receipts without overwriting one
     runRegistryProcess("resume", "issued-b"),
   ])
   expect(resumed.map((r) => r.exitCode)).toEqual([0, 0])
-})
+}, 30_000)
 
 async function runRegistryProcess(
   mode: string,
@@ -377,12 +426,27 @@ async function runRegistryProcess(
     ],
     { stdout: "pipe", stderr: "pipe" },
   )
-  const [exitCode, output] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ])
-  return { exitCode, output }
+  children.add(child)
+  const timeoutState = { expired: false }
+  const deadline = setTimeout(() => {
+    timeoutState.expired = true
+    child.kill()
+  }, 10_000)
+  try {
+    const [exitCode, output, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    if (timeoutState.expired)
+      throw new Error(`Registry subprocess exceeded 10 seconds: ${stderr}`)
+    return { exitCode, output: output + stderr }
+  } finally {
+    clearTimeout(deadline)
+    if (child.exitCode === null) child.kill()
+    await child.exited
+    children.delete(child)
+  }
 }
 
 function sse(values: Array<unknown>): Response {
@@ -445,6 +509,129 @@ function installFetch(
     },
   ) as typeof fetch
 }
+
+async function foreignManifest(ciphertexts: Array<string>) {
+  const filename = path.join(directory, "foreign.json")
+  await writeFile(
+    filename,
+    JSON.stringify({
+      version: 1,
+      sourceProvider: "openai",
+      sourceSessionId: "synthetic-source",
+      ciphertextSha256: ciphertexts.map((value) =>
+        createHash("sha256").update(value).digest("hex"),
+      ),
+    }),
+  )
+  process.env.COPILOT_FOREIGN_REASONING_MANIFEST = filename
+}
+
+for (const stream of [false, true]) {
+  test(`explicit foreign reasoning avoids invalid_request_body without losing history stream=${stream}`, async () => {
+    const current = {
+      type: "reasoning",
+      id: "current",
+      encrypted_content: "current-cipher",
+      summary: [],
+    }
+    installFetch(() => completedSse([current]))
+    await (await request([])).text()
+    // Even an operator manifest cannot override a current-upstream receipt.
+    await foreignManifest(["foreign-cipher", "current-cipher"])
+    const input = [
+      {
+        type: "reasoning",
+        id: "foreign",
+        encrypted_content: "foreign-cipher",
+        summary: [{ type: "summary_text", text: "Visible summary" }],
+      },
+      current,
+      { type: "reasoning", encrypted_content: "unknown-cipher", summary: [] },
+      { role: "user", content: "Remember bluebird" },
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "read",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "bluebird" },
+    ]
+    const bodies: Array<Record<string, unknown>> = []
+    installFetch((_url, init) => {
+      const body = JSON.parse(requestBody(init)) as Record<string, unknown>
+      bodies.push(body)
+      if (requestBody(init).includes("foreign-cipher"))
+        return Response.json(
+          { error: { code: "invalid_request_body", message: "" } },
+          { status: 400 },
+        )
+      return stream ? completedSse() : Response.json(completedObject())
+    })
+    const response = await request(input, stream)
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain(
+      stream ? "response.completed" : "response_1",
+    )
+    expect(bodies).toHaveLength(1)
+    const { encrypted_content: _ciphertext, ...visible } = input[0]
+    expect(bodies[0].input).toEqual([visible, ...input.slice(1)])
+    expect(input[0].encrypted_content).toBe("foreign-cipher")
+  })
+}
+
+test("generic 400 never removes unrecognized reasoning or retries", async () => {
+  await foreignManifest(["other-cipher"])
+  let calls = 0
+  installFetch((_url, init) => {
+    calls++
+    expect(requestBody(init)).toContain("old-cipher")
+    return Response.json(
+      { error: { code: "invalid_request_body", message: "" } },
+      { status: 400 },
+    )
+  })
+  expect((await request([oldReasoning()])).status).toBe(400)
+  expect(calls).toBe(1)
+})
+
+test("invalid foreign manifests stop before provider I/O", async () => {
+  await foreignManifest(["foreign-cipher"])
+  await writeFile(path.join(directory, "foreign.json"), "{invalid")
+  let calls = 0
+  installFetch(() => {
+    calls++
+    return completedSse()
+  })
+  expect((await request([oldReasoning()])).status).toBe(500)
+  expect(calls).toBe(0)
+})
+
+test("foreign policy fails closed when current-origin receipts are corrupt", async () => {
+  const current = {
+    type: "reasoning",
+    encrypted_content: "current-cipher",
+    summary: [],
+  }
+  installFetch(() => completedSse([current]))
+  await (await request([])).text()
+  const scope = (await readdir(directory))[0]
+  await writeFile(
+    path.join(
+      directory,
+      scope,
+      createHash("sha256").update("current-cipher").digest("hex"),
+    ),
+    "corrupt",
+  )
+  await foreignManifest(["current-cipher"])
+  let calls = 0
+  installFetch(() => {
+    calls++
+    return completedSse()
+  })
+  expect((await request([current])).status).toBe(500)
+  expect(calls).toBe(0)
+})
 
 function requestBody(init?: RequestInit): string {
   if (typeof init?.body !== "string")

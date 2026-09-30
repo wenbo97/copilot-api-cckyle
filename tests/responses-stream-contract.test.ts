@@ -3,7 +3,10 @@ import { describe, expect, test } from "bun:test"
 import type { ResponseStreamState } from "../src/routes/responses/responses-types"
 import type { ChatCompletionChunk } from "../src/services/copilot/create-chat-completions"
 
-import { translateChunkToResponseEvents } from "../src/routes/responses/stream-translation"
+import {
+  translateChunkToResponseEvents,
+  finishResponseStream,
+} from "../src/routes/responses/stream-translation"
 
 const freshState = (): ResponseStreamState => ({
   responseId: "",
@@ -38,6 +41,7 @@ describe("synthetic Responses streaming contract", () => {
     const events = [
       ...translateChunkToResponseEvents(chunk({ content: "hello" }), state),
       ...translateChunkToResponseEvents(chunk({}, "stop"), state),
+      ...finishResponseStream(state),
     ]
 
     expect(events.map((event) => event.type)).toEqual([

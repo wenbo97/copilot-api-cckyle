@@ -25,19 +25,36 @@ afterAll(() => {
 describe("Responses streaming HTTP lifecycle", () => {
   test("keeps native Responses features outside the Chat fallback guard", async () => {
     setModel("gpt-5.6-sol", ["/responses"])
-    globalThis.fetch = mock(() =>
-      Promise.resolve(
-        Response.json({
-          id: "resp_native",
-          object: "response",
-          created_at: 1,
-          model: "gpt-5.6-sol",
-          status: "completed",
-          output: [],
-          error: null,
-          incomplete_details: null,
-        }),
-      ),
+    const input = [
+      {
+        type: "function_call_output",
+        call_id: "call_native",
+        output: [
+          { type: "input_text", text: "result" },
+          { type: "input_image", image_url: "https://example.test/image" },
+          { type: "input_file", file_id: "file_test" },
+        ],
+      },
+    ]
+    let upstreamInput: unknown
+    globalThis.fetch = mock(
+      (_url: string | URL | Request, init?: RequestInit) => {
+        if (typeof init?.body !== "string")
+          throw new Error("Expected a JSON body")
+        upstreamInput = (JSON.parse(init.body) as { input: unknown }).input
+        return Promise.resolve(
+          Response.json({
+            id: "resp_native",
+            object: "response",
+            created_at: 1,
+            model: "gpt-5.6-sol",
+            status: "completed",
+            output: [],
+            error: null,
+            incomplete_details: null,
+          }),
+        )
+      },
     ) as unknown as typeof fetch
 
     const response = await server.request("http://localhost/v1/responses", {
@@ -45,12 +62,13 @@ describe("Responses streaming HTTP lifecycle", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: "gpt-5.6-sol",
-        input: "continue",
+        input,
         previous_response_id: "resp_previous",
       }),
     })
 
     expect(response.status).toBe(200)
+    expect(upstreamInput).toEqual(input)
     expect(await response.json()).toMatchObject({
       id: "resp_native",
       status: "completed",

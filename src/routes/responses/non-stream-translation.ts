@@ -1,3 +1,4 @@
+import { InvalidRequestError } from "~/lib/error"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -23,6 +24,7 @@ import {
   isEncryptedPart,
   UNREADABLE_PAYLOAD_MARKER,
 } from "../_shared/encrypted-content"
+import { translateChatUsage } from "./usage-translation"
 
 // --- Request translation: Responses API → Chat Completions ---
 
@@ -45,7 +47,10 @@ export function translateToOpenAI(
     parallel_tool_calls: payload.parallel_tool_calls,
     reasoning_effort: payload.reasoning?.effort,
     response_format: translateTextFormat(payload.text?.format),
-    stream_options: payload.stream_options,
+    stream_options:
+      payload.stream ?
+        { ...payload.stream_options, include_usage: true }
+      : undefined,
     prompt_cache_key: payload.prompt_cache_key,
     prompt_cache_retention: payload.prompt_cache_retention,
     safety_identifier: payload.safety_identifier,
@@ -85,31 +90,32 @@ function translateInputToMessages(
     return messages
   }
 
+  let pendingCalls: Message | undefined
   for (const item of input) {
     if (isFunctionCallOutput(item)) {
+      pendingCalls = undefined
       // Tool *result* (user turn) -> a role:tool message.
       messages.push({
         role: "tool",
         tool_call_id: item.call_id,
-        content: item.output,
+        content: translateToolOutput(item.output),
       })
     } else if (isFunctionCall(item)) {
       // Tool *invocation* (assistant turn) -> an assistant message carrying
       // tool_calls. Both items share `call_id`, so they MUST be told apart by
       // `type`, not by key presence (the old "call_id" in item check misrouted
       // this as a second role:tool message).
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: [
-          {
-            id: item.call_id,
-            type: "function",
-            function: { name: item.name, arguments: item.arguments },
-          },
-        ],
+      if (!pendingCalls) {
+        pendingCalls = { role: "assistant", content: null, tool_calls: [] }
+        messages.push(pendingCalls)
+      }
+      pendingCalls.tool_calls?.push({
+        id: item.call_id,
+        type: "function",
+        function: { name: item.name, arguments: item.arguments },
       })
     } else if (hasContent(item)) {
+      pendingCalls = undefined
       const msg = item
       // The wire shape is looser than the union: Codex's `agent_message` items
       // (sub-agent / skill turns) carry no `role` at all. Emitting
@@ -127,6 +133,22 @@ function translateInputToMessages(
   }
 
   return messages
+}
+
+function translateToolOutput(
+  output: ResponseInputFunctionCallOutput["output"],
+): Message["content"] {
+  if (typeof output === "string") return output
+  return output.map((part) => {
+    if (part.type !== "input_text" || typeof part.text !== "string") {
+      throw new InvalidRequestError(
+        "Chat fallback only supports text tool outputs.",
+        "unsupported_feature",
+        "input",
+      )
+    }
+    return { type: "text", text: part.text }
+  })
 }
 
 /**
@@ -273,7 +295,7 @@ export function translateToResponses(
     output: translateChoiceOutput(response.id, choice, terminal.itemStatus),
     metadata,
     incomplete_details: terminal.incompleteDetails,
-    usage: translateUsage(response),
+    usage: translateChatUsage(response.usage),
     error: terminal.error,
   }
 }
@@ -377,20 +399,12 @@ function missingChoiceResponse(
     output: [],
     metadata,
     incomplete_details: null,
-    usage: translateUsage(response),
+    usage: translateChatUsage(response.usage),
     error: {
       code: "invalid_upstream_response",
       type: "server_error",
       message: "Upstream Chat Completions response contained no choices.",
       param: null,
     },
-  }
-}
-
-function translateUsage(response: ChatCompletionResponse) {
-  return {
-    input_tokens: response.usage?.prompt_tokens ?? 0,
-    output_tokens: response.usage?.completion_tokens ?? 0,
-    total_tokens: response.usage?.total_tokens ?? 0,
   }
 }

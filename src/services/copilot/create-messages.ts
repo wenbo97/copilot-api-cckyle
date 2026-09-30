@@ -1,14 +1,17 @@
-import { events } from "fetch-event-stream"
-
 import type {
   AnthropicMessagesPayload,
   AnthropicResponse,
 } from "~/routes/messages/anthropic-types"
 
-import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
-import { mapThinkingToReasoningEffort } from "~/routes/messages/non-stream-translation"
+import {
+  clampReasoningEffort,
+  resolveMessagesReasoningEffort,
+} from "~/routes/_shared/reasoning-policy"
+
+import type { CopilotRequestOptions } from "./request-options"
 
 import { copilotFetch } from "./copilot-fetch"
+import { CopilotStreamLifecycle } from "./stream-lifecycle"
 
 const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 
@@ -36,6 +39,7 @@ export interface CreateMessagesHeaders {
 export const createMessages = async (
   payload: AnthropicMessagesPayload,
   headers: CreateMessagesHeaders = {},
+  options: CopilotRequestOptions = {},
 ) => {
   const enableVision = hasVisionContent(payload)
   const isAgentCall = hasAgentMessages(payload)
@@ -50,24 +54,33 @@ export const createMessages = async (
   }
   if (enableVision) extraHeaders["copilot-vision-request"] = "true"
 
-  const response = await copilotFetch("/v1/messages", {
-    method: "POST",
-    body: JSON.stringify(body),
-    extraHeaders,
-  })
+  const lifecycle =
+    payload.stream ?
+      new CopilotStreamLifecycle(options.signal, options.streamTimeouts)
+    : undefined
+  try {
+    const response = await copilotFetch("/v1/messages", {
+      method: "POST",
+      body: JSON.stringify(body),
+      extraHeaders,
+      signal: lifecycle?.signal ?? options.signal,
+      headerTimeoutMs: options.headerTimeoutMs,
+    })
 
-  if (payload.stream) {
-    return events(response)
+    if (lifecycle) return lifecycle.iterate(response)
+
+    return (await response.json()) as AnthropicResponse
+  } catch (error) {
+    lifecycle?.dispose(error)
+    throw error
   }
-
-  return (await response.json()) as AnthropicResponse
 }
 
 /**
  * Copilot's native /v1/messages rejects Anthropic's standard thinking shape
  * (`{type:"enabled", budget_tokens}`) and requires `{type:"adaptive"}` plus
- * `output_config.effort`. Claude Code always sends the standard shape, so we
- * translate that ONE field, mapping the token budget to a per-model-clamped
+ * `output_config.effort`. Legacy clients send the enabled shape, so we
+ * translate that field, mapping the token budget to a per-model-clamped
  * effort level (reusing the same budget->effort logic as the translate path).
  * Returns the payload unchanged when no enabled-thinking is present.
  */
@@ -75,20 +88,22 @@ function adaptThinkingForCopilot(
   payload: AnthropicMessagesPayload,
 ): Record<string, unknown> {
   const thinking = payload.thinking
-  if (!thinking || (thinking.type as string) !== "enabled") {
-    return { ...payload }
-  }
-
   const effort = clampReasoningEffort(
     payload.model,
-    mapThinkingToReasoningEffort(thinking, payload.max_tokens) ?? "high",
+    resolveMessagesReasoningEffort(payload),
   )
-
-  const { thinking: _omit, ...rest } = payload
+  if (!thinking || thinking.type !== "enabled") {
+    return effort === undefined ?
+        { ...payload }
+      : {
+          ...payload,
+          output_config: { ...payload.output_config, effort },
+        }
+  }
   return {
-    ...rest,
+    ...payload,
     thinking: { type: "adaptive" },
-    output_config: { effort },
+    output_config: { ...payload.output_config, effort },
   }
 }
 

@@ -88,16 +88,18 @@ describe("Responses input connection rejection", () => {
       expect(ensureToken.mock.calls.some(([force]) => force === true)).toBe(
         false,
       )
-      expect(response.status).toBe(400)
+      expect(response.status).toBe(401)
       const errorBody: unknown = await response.json()
       expect(errorBody).toMatchObject({
         error: {
-          type: "invalid_request_error",
+          type: "upstream_error",
           code: "copilot_input_connection_mismatch",
           param: "input",
         },
       })
       expect(JSON.stringify(errorBody)).toContain(ownershipMessage)
+      expect(JSON.stringify(errorBody)).toContain("removed=1")
+      expect(JSON.stringify(errorBody)).not.toContain("No history was removed")
     },
   )
 

@@ -16,7 +16,7 @@ const STREAM_CLOSED = new DOMException(
 /**
  * Owns the abort and timeout lifecycle for one Copilot streaming request.
  *
- * The controller signal is passed to both `fetch()` and the SSE reader. This is
+ * The controller signal aborts `fetch()` and is checked between SSE frames. This is
  * important because fetch-event-stream does not cancel its locked reader when a
  * consumer leaves a `for await` loop early. Aborting here in `finally` releases
  * the network body in every success, failure, timeout, and downstream-cancel
@@ -60,13 +60,18 @@ export class CopilotStreamLifecycle {
     this.startFirstEventTimer()
 
     try {
-      for await (const event of events(response, this.signal)) {
+      this.signal.throwIfAborted()
+      // Fetch aborts the body. Do not also ask the parser to cancel its reader:
+      // canceling an already-errored reader between yielded frames can reject.
+      for await (const event of events(response)) {
+        this.signal.throwIfAborted()
         // Activity means every parsed upstream SSE frame, including reasoning,
         // usage, and tool frames. It is deliberately not limited to visible
         // text tokens.
         this.noteActivity()
         yield event
       }
+      this.signal.throwIfAborted()
     } finally {
       this.dispose()
     }

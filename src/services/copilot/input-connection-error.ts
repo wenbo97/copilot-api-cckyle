@@ -1,4 +1,4 @@
-import { InvalidRequestError } from "~/lib/error"
+import { ResponsesUpstreamError } from "./responses-upstream-error"
 
 const OWNERSHIP_MESSAGE = "input item does not belong to this connection"
 const MAX_ERROR_BYTES = 16 * 1024
@@ -12,24 +12,18 @@ export async function rejectInputConnectionMismatch(
 ): Promise<void> {
   if (path !== "/responses" || response.status !== 401) return
 
-  const message = await readErrorMessage(response, signal)
+  const detail = await readCopilotErrorDetail(response, signal)
   signal?.throwIfAborted()
-  if (message?.trim().toLowerCase() !== OWNERSHIP_MESSAGE) return
+  if (detail?.message.trim().toLowerCase() !== OWNERSHIP_MESSAGE) return
 
   await response.body?.cancel()
-  throw new InvalidRequestError(
-    `Copilot rejected the conversation history: ${OWNERSHIP_MESSAGE}. `
-      + "Check that this history belongs to the current account and endpoint, "
-      + "or start a new conversation. No history was removed by the proxy.",
-    "copilot_input_connection_mismatch",
-    "input",
-  )
+  throw new ResponsesUpstreamError(response.status, detail.message, detail.code)
 }
 
-async function readErrorMessage(
+export async function readCopilotErrorDetail(
   response: Response,
   signal?: AbortSignal,
-): Promise<string | undefined> {
+): Promise<{ message: string; code?: string } | undefined> {
   // Inspect only a bounded error body. Cancel the cloned reader without
   // awaiting its tee cancellation: the original body is still owned by the
   // caller and must remain readable for ordinary authentication errors.
@@ -65,7 +59,9 @@ async function readErrorMessage(
   }
 }
 
-function errorMessage(text: string): string | undefined {
+function errorMessage(
+  text: string,
+): { message: string; code?: string } | undefined {
   const body: unknown = JSON.parse(text)
   if (typeof body !== "object" || body === null || !("error" in body)) return
   const error = body.error
@@ -75,5 +71,11 @@ function errorMessage(text: string): string | undefined {
     && "message" in error
     && typeof error.message === "string"
   )
-    return error.message
+    return {
+      message: error.message,
+      code:
+        "code" in error && typeof error.code === "string" && error.code ?
+          error.code
+        : undefined,
+    }
 }

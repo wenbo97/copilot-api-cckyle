@@ -9,6 +9,7 @@ echo.
 
 ECHO Starting Copilot-Api service...
 
+set COPILOT_CACHE_DIAGNOSTICS=1
 cd /d "%~dp0" || exit /b 1
 bun run dev:cache
 

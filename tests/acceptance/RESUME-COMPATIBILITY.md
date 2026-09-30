@@ -3,7 +3,42 @@
 Date: 2026-09-21. Feature commit: `dd349783b6a259d71fad21970dd8a3cb207436ef`.
 Integrated with `origin/master` at `9f205372e22a3fabbf6c5a128096fcd533ead1eb`.
 
+2026-09-29 local follow-up: ownership failures now preserve HTTP 401, upstream
+error codes, and accurate retry-copy cleanup descriptions. Registry failures
+retain the original upstream cause. SSE failures preserve the same classification,
+including a different final failure (such as HTTP 503) after recovery. These
+changes are covered by offline regressions; the historical live results below
+do not establish deployment of this follow-up.
+
+The second 2026-09-29 local follow-up adds cancellation propagation across all
+six generation routes, including downstream SSE-reader cancellation, and explicit
+Messages bridge terminal handling. Responses-to-Chat fallback now preserves
+parallel tool replay and observable usage, and rejects unsupported tool outputs
+before fetching. Registry subprocess checks have 10-second child deadlines and
+30-second test budgets, with cleanup before temporary directories are removed.
+These are offline source changes; no service restart, deployment, live model
+request, or quota experiment has been performed for this follow-up.
+
 ## Behavior
+
+2026-09-30 adds an explicit, opt-in foreign-reasoning manifest for the generic
+400 `invalid_request_body` case. `COPILOT_FOREIGN_REASONING_MANIFEST` points to
+a version-1 JSON file with `sourceProvider: "openai"`, `sourceSessionId`, and
+`ciphertextSha256`. Export it from an operator-confirmed OpenAI rollout using
+`scripts/export-foreign-reasoning.ts`. Only listed reasoning ciphertext without
+a current-upstream receipt is omitted, before the first request. Unknown
+ciphertext remains unchanged. Invalid configuration or corrupt matching receipts
+fails before I/O; no generic-400 recovery is added. The policy runs before cache
+policy and diagnostics, so both see the actual sanitized egress. It is disabled
+by default and never edits a rollout. Mixed-origin exports require per-item
+review; session metadata is evidence, not cryptographic provenance.
+
+Regression coverage includes JSON/SSE, preserved summaries/IDs/tool pairs,
+current-issued and unknown ciphertext, no generic-400 retry, corrupt receipts,
+invalid manifests, and privacy-preserving export. The 563-item diagnostic fork
+also passed offline replay: 137 target fields omitted, all other egress fields
+unchanged. The earlier live differential proves the original field-level trigger;
+it does not certify live deployment of this new implementation.
 
 Native Responses requests normally preserve encrypted reasoning. On the precise
 upstream 401 `input item does not belong to this connection`, the request may

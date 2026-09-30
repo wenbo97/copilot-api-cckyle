@@ -1,4 +1,7 @@
-import { clampReasoningEffort } from "~/routes/_shared/reasoning-policy"
+import {
+  clampReasoningEffort,
+  resolveMessagesReasoningEffort,
+} from "~/routes/_shared/reasoning-policy"
 import { deriveAnthropicStopReason } from "~/routes/_shared/stop-reason"
 import {
   anthropicToolsToResponses,
@@ -21,14 +24,15 @@ import type {
   AnthropicToolResultBlock,
 } from "./anthropic-types"
 
-import { mapThinkingToReasoningEffort } from "./non-stream-translation"
+import { formatMessagesUsage, readMessagesUsage } from "./usage-translation"
 
 // =============================================================================
 // Anthropic Messages  ->  OpenAI Responses   (REQUEST translation)
 //
 // Lossy, cross-protocol bridge so Claude Code can reach /responses-only models
 // (gpt-5.5, gpt-5.3-codex). Documented losses: reasoning original text (the
-// backend encrypts it), cache_control, `strict` tool schemas, top_k.
+// backend encrypts it), cache_control, top_k. Tool schemas default to non-strict
+// so optional Anthropic fields remain optional; explicit strict is preserved.
 // =============================================================================
 
 export function translateAnthropicToResponses(
@@ -36,7 +40,7 @@ export function translateAnthropicToResponses(
 ): ResponsesPayload {
   const effort = clampReasoningEffort(
     payload.model,
-    mapThinkingToReasoningEffort(payload.thinking, payload.max_tokens),
+    resolveMessagesReasoningEffort(payload),
   ) as ReasoningEffort | undefined
 
   const result: ResponsesPayload = {
@@ -182,12 +186,9 @@ export function translateResponsesToAnthropic(
     role: "assistant",
     model,
     content,
-    stop_reason: deriveAnthropicStopReason(hasToolCall, response.status),
+    stop_reason: deriveAnthropicStopReason(hasToolCall, response),
     stop_sequence: null,
-    usage: {
-      input_tokens: response.usage?.input_tokens ?? 0,
-      output_tokens: response.usage?.output_tokens ?? 0,
-    },
+    usage: formatMessagesUsage(readMessagesUsage(response.usage, "responses")),
   }
 }
 

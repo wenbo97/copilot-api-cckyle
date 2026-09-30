@@ -1,3 +1,5 @@
+import type { MessagesUsage } from "./usage-translation"
+
 // Anthropic API Types
 
 export interface AnthropicMessagesPayload {
@@ -19,8 +21,12 @@ export interface AnthropicMessagesPayload {
     name?: string
   }
   thinking?: {
-    type: "enabled"
+    type: "enabled" | "adaptive" | "disabled"
     budget_tokens?: number
+  }
+  output_config?: {
+    effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+    [key: string]: unknown
   }
   service_tier?: "auto" | "standard_only"
 }
@@ -84,6 +90,7 @@ export interface AnthropicTool {
   name: string
   description?: string
   input_schema: Record<string, unknown>
+  strict?: boolean
 }
 
 export interface AnthropicResponse {
@@ -193,6 +200,9 @@ export type AnthropicStreamEventData =
 
 // State for streaming translation
 export interface AnthropicStreamState {
+  usage?: MessagesUsage
+  pendingStopReason?: AnthropicResponse["stop_reason"]
+  terminalEmitted?: boolean
   messageStartSent: boolean
   contentBlockIndex: number
   contentBlockOpen: boolean

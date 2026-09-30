@@ -5,6 +5,7 @@ import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
 import { pickEgress } from "~/lib/endpoint-router"
+import { HTTPError } from "~/lib/error"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
@@ -14,13 +15,16 @@ import {
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 import { createResponses } from "~/services/copilot/create-responses"
-import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
 import {
-  readCopilotHeaderTimeoutMs,
-  readCopilotStreamTimeouts,
-} from "~/services/copilot/stream-lifecycle"
+  copilotRequestOptions,
+  type CopilotRequestScope,
+} from "~/services/copilot/request-options"
+import {
+  describeHistoryRecovery,
+  ResponsesUpstreamError,
+} from "~/services/copilot/responses-upstream-error"
 
-import type { ResponseObject } from "./responses-types"
+import type { ResponseError, ResponseObject } from "./responses-types"
 import type { ResponsesPayload, ResponseStreamState } from "./responses-types"
 
 import {
@@ -40,12 +44,13 @@ import {
   parseNativeResponsesSseData,
 } from "./stream-protocol"
 import {
+  finishResponseStream,
   translateChunkToResponseEvents,
   translateStreamFailureToResponseEvents,
 } from "./stream-translation"
 
 export async function handleResponses(c: Context) {
-  await checkRateLimit(state)
+  await checkRateLimit(state, c.req.raw.signal)
 
   let payload = await c.req.json<ResponsesPayload>()
   consola.debug(
@@ -107,11 +112,8 @@ async function handleResponsesFallback(c: Context, payload: ResponsesPayload) {
 
   if (state.manualApprove) await awaitApproval()
 
-  const response = await createChatCompletions(openAIPayload, {
-    signal: c.req.raw.signal,
-    headerTimeoutMs: readCopilotHeaderTimeoutMs(),
-    streamTimeouts: readCopilotStreamTimeouts(),
-  })
+  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const response = await createChatCompletions(openAIPayload, requestOptions)
 
   if (isNonStreaming(response)) {
     consola.debug(
@@ -132,10 +134,16 @@ async function handleResponsesFallback(c: Context, payload: ResponsesPayload) {
 
   // Streaming — Responses API uses plain SSE with `type` field in data, not `event:` field
   consola.debug("Streaming response from Copilot")
-  return streamChatFallback(c, { payload, response, traceTimestamp })
+  return streamChatFallback(c, {
+    payload,
+    response,
+    traceTimestamp,
+    requestOptions,
+  })
 }
 
 interface ChatFallbackStreamContext {
+  requestOptions: CopilotRequestScope
   payload: ResponsesPayload
   response: Exclude<
     Awaited<ReturnType<typeof createChatCompletions>>,
@@ -145,8 +153,9 @@ interface ChatFallbackStreamContext {
 }
 
 function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
-  const { payload, response, traceTimestamp } = context
+  const { payload, response, traceTimestamp, requestOptions } = context
   return streamSSE(c, async (stream) => {
+    stream.onAbort(requestOptions.abort)
     const streamState: ResponseStreamState = {
       responseId: "",
       model: payload.model,
@@ -162,7 +171,7 @@ function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
 
     try {
       for await (const rawEvent of response) {
-        if (c.req.raw.signal.aborted) break
+        if (requestOptions.signal.aborted) break
         consola.debug(
           "Copilot raw stream event:",
           JSON.stringify(redactCollaborationForLogging(rawEvent)),
@@ -196,18 +205,30 @@ function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
         if (streamState.terminalEmitted) break
       }
 
-      if (!c.req.raw.signal.aborted && !streamState.terminalEmitted) {
-        const message =
-          endedWithDone ?
-            "Upstream Chat Completions sent [DONE] before a finish_reason."
-          : "Upstream Chat Completions stream ended before a finish_reason."
-        await writeSyntheticFailure(
-          { state: streamState, stream, tracer: streamTracer },
-          message,
-        )
+      if (!requestOptions.signal.aborted && !streamState.terminalEmitted) {
+        if (streamState.pendingResponse) {
+          for (const event of finishResponseStream(streamState)) {
+            streamTracer.addChunk(
+              redactCollaborationForLogging({ responses: event }),
+            )
+            await stream.writeSSE({
+              event: event.type,
+              data: JSON.stringify(event),
+            })
+          }
+        } else {
+          const message =
+            endedWithDone ?
+              "Upstream Chat Completions sent [DONE] before a finish_reason."
+            : "Upstream Chat Completions stream ended before a finish_reason."
+          await writeSyntheticFailure(
+            { state: streamState, stream, tracer: streamTracer },
+            message,
+          )
+        }
       }
     } catch (error) {
-      if (!c.req.raw.signal.aborted && !streamState.terminalEmitted) {
+      if (!requestOptions.signal.aborted && !streamState.terminalEmitted) {
         await writeSyntheticFailure(
           { state: streamState, stream, tracer: streamTracer },
           describeStreamError("Upstream Chat Completions stream failed", error),
@@ -262,11 +283,8 @@ async function handleResponsesPassthrough(
 
   if (state.manualApprove) await awaitApproval()
 
-  const response = await createResponses(payload, {
-    signal: c.req.raw.signal,
-    headerTimeoutMs: readCopilotHeaderTimeoutMs(),
-    streamTimeouts: readCopilotStreamTimeouts(),
-  })
+  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const response = await createResponses(payload, requestOptions)
 
   if (isResponsesNonStreaming(response)) {
     const restored = restoreCollaborationForCodex(response)
@@ -286,6 +304,7 @@ async function handleResponsesPassthrough(
 
   consola.debug("Streaming passthrough response from Copilot")
   return streamSSE(c, async (stream) => {
+    stream.onAbort(requestOptions.abort)
     const streamTracer = new StreamTracer(traceTimestamp)
     // Copilot tags each event of one output item with a different item id, which
     // crashes clients that key streaming state by item id (Vercel AI SDK "part
@@ -296,7 +315,7 @@ async function handleResponsesPassthrough(
 
     try {
       for await (const rawEvent of response) {
-        if (c.req.raw.signal.aborted) break
+        if (requestOptions.signal.aborted) break
         if (rawEvent.data === "[DONE]") {
           consola.debug("Copilot raw responses event: [DONE]")
           endedWithDone = true
@@ -322,7 +341,7 @@ async function handleResponsesPassthrough(
         if (tracker.terminalSeen) break
       }
 
-      if (!c.req.raw.signal.aborted && !tracker.terminalSeen) {
+      if (!requestOptions.signal.aborted && !tracker.terminalSeen) {
         const message =
           endedWithDone ?
             "Upstream Responses stream sent [DONE] before a terminal event."
@@ -333,10 +352,17 @@ async function handleResponsesPassthrough(
         )
       }
     } catch (error) {
-      if (!c.req.raw.signal.aborted && !tracker.terminalSeen) {
+      if (!requestOptions.signal.aborted && !tracker.terminalSeen) {
         await writeNativeFailure(
           { stream, tracer: streamTracer, tracker },
           describeStreamError("Upstream Responses stream failed", error),
+          error instanceof ResponsesUpstreamError ?
+            {
+              code: error.code,
+              type: "upstream_error",
+              param: error.param ?? null,
+            }
+          : undefined,
         ).catch(() => undefined)
       }
     } finally {
@@ -379,9 +405,10 @@ interface NativeFailureContext {
 async function writeNativeFailure(
   context: NativeFailureContext,
   message: string,
+  detail?: Omit<ResponseError, "message">,
 ): Promise<void> {
   const { stream, tracer, tracker } = context
-  for (const event of tracker.fail(message)) {
+  for (const event of tracker.fail(message, detail)) {
     tracer.addChunk(redactCollaborationForLogging(event))
     await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
   }
@@ -389,8 +416,10 @@ async function writeNativeFailure(
 
 function describeStreamError(prefix: string, error: unknown): string {
   if (error instanceof ResponsesUpstreamError) {
-    return `${prefix} (HTTP ${error.status}, ${error.code}): ${error.message}`
+    return `${prefix} (HTTP ${error.status}, ${error.code}): ${error.message}${describeHistoryRecovery(error.recovery)}`
   }
+  if (error instanceof HTTPError)
+    return `${prefix} (HTTP ${error.response.status}): ${error.message}${describeHistoryRecovery(error.recovery)}`
   const message = error instanceof Error ? error.message : String(error)
   return `${prefix}: ${message}`
 }

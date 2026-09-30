@@ -9,6 +9,8 @@ import type {
   ResponseStreamState,
 } from "./responses-types"
 
+import { translateChatUsage } from "./usage-translation"
+
 type WithoutSequence<T> = T extends unknown ? Omit<T, "sequence_number"> : never
 type UnsequencedResponseStreamEvent = WithoutSequence<ResponseStreamEvent>
 
@@ -28,7 +30,20 @@ export function translateChunkToResponseEvents(
   const events: Array<ResponseStreamEvent> = []
   if (state.terminalEmitted) return events
 
-  updateStreamMetadata(chunk, state)
+  const observedUsage = updateStreamMetadata(chunk, state)
+  if (state.pendingResponse) {
+    if (
+      chunk.choices.some(
+        (choice) => choice.delta.content || choice.delta.tool_calls?.length,
+      )
+    ) {
+      return translateStreamFailureToResponseEvents(
+        "Upstream sent content after finish_reason.",
+        state,
+      )
+    }
+    return observedUsage ? finishResponseStream(state) : events
+  }
   if (chunk.choices.length === 0) return events
 
   const choice = chunk.choices[0]
@@ -38,8 +53,24 @@ export function translateChunkToResponseEvents(
 
   if (choice.finish_reason) {
     emitFinish(choice.finish_reason, state, events)
+    if (observedUsage) events.push(...finishResponseStream(state))
   }
 
+  return events
+}
+
+export function finishResponseStream(
+  state: ResponseStreamState,
+): Array<ResponseStreamEvent> {
+  if (state.terminalEmitted || !state.pendingResponse) return []
+  const events: Array<ResponseStreamEvent> = []
+  const response = { ...state.pendingResponse, usage: state.usage }
+  if (response.status === "completed")
+    pushEvent(state, events, { type: "response.completed", response })
+  else if (response.status === "incomplete")
+    pushEvent(state, events, { type: "response.incomplete", response })
+  else pushEvent(state, events, { type: "response.failed", response })
+  state.terminalEmitted = true
   return events
 }
 
@@ -62,7 +93,9 @@ export function translateStreamFailureToResponseEvents(
     return events
   }
 
-  const output = closeOutputItems(state, "incomplete", events)
+  const output =
+    state.pendingResponse?.output
+    ?? closeOutputItems(state, "incomplete", events)
   const response = makeResponse(state, "failed", output)
   response.error = {
     code: "invalid_upstream_response",
@@ -78,20 +111,16 @@ export function translateStreamFailureToResponseEvents(
 function updateStreamMetadata(
   chunk: ChatCompletionChunk,
   state: ResponseStreamState,
-): void {
+): boolean {
   state.responseId ||= chunk.id
   state.model ||= chunk.model
   state.createdAt ??= chunk.created
   state.nextSequenceNumber ??= 1
   state.terminalEmitted ??= false
 
-  if (chunk.usage) {
-    state.usage = {
-      input_tokens: chunk.usage.prompt_tokens,
-      output_tokens: chunk.usage.completion_tokens,
-      total_tokens: chunk.usage.total_tokens,
-    }
-  }
+  const usage = translateChatUsage(chunk.usage)
+  if (usage) state.usage = usage
+  return usage !== undefined
 }
 
 function emitResponseStart(
@@ -286,7 +315,6 @@ function emitFinish(
     response.incomplete_details = {
       reason: getIncompleteReason(finishReason),
     }
-    pushEvent(state, events, { type: "response.incomplete", response })
   } else if (terminalStatus === "failed") {
     response.error = {
       code: "invalid_upstream_response",
@@ -294,12 +322,9 @@ function emitFinish(
       message: protocolError ?? "The upstream stream was malformed.",
       param: null,
     }
-    pushEvent(state, events, { type: "response.failed", response })
-  } else {
-    pushEvent(state, events, { type: "response.completed", response })
   }
 
-  state.terminalEmitted = true
+  state.pendingResponse = response
 }
 
 function openPendingToolItems(
@@ -491,11 +516,7 @@ function makeResponse(
     status,
     output,
     metadata: state.metadata,
-    usage: state.usage ?? {
-      input_tokens: 0,
-      output_tokens: 0,
-      total_tokens: 0,
-    },
+    usage: state.usage,
     incomplete_details: null,
     error: null,
   }

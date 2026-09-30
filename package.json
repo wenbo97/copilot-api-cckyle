@@ -22,6 +22,7 @@
     "dist"
   ],
   "scripts": {
+    "acceptance:local": "bun run ./tests/acceptance/local.ts",
     "auth": "bun run ./src/main.ts auth --account-type enterprise ",
     "build": "tsdown",
     "dev": "bun run ./src/main.ts start --account-type enterprise",
@@ -36,8 +37,9 @@
     "prepare": "simple-git-hooks",
     "probe:direct": "bun run ./tests/direct-probe.ts",
     "release": "bumpp && bun publish --access public",
-    "start": "NODE_ENV=production bun run ./src/main.ts",
-    "typecheck": "tsc"
+    "start": "NODE_ENV=production bun run ./src/main.ts start",
+    "typecheck": "tsc",
+    "usage:summary": "bun run ./scripts/usage-summary.ts"
   },
   "simple-git-hooks": {
     "pre-commit": "bunx lint-staged"

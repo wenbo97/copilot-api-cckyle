@@ -1,4 +1,14 @@
 {
+  "include": [
+    "src/**/*",
+    "tests/**/*",
+    "scripts/**/*",
+    "*.ts",
+    "*.js",
+    "*.mjs",
+    "*.cjs"
+  ],
+  "exclude": ["node_modules", "dist", "tmps", "tests/_runlog"],
   "compilerOptions": {
     "target": "ESNext",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],

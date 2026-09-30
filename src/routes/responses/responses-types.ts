@@ -107,8 +107,24 @@ export interface ResponseInputFunctionCall {
 export interface ResponseInputFunctionCallOutput {
   type: "function_call_output"
   call_id: string
-  output: string
+  output: string | Array<ResponseToolOutputPart>
 }
+
+export type ResponseToolOutputPart =
+  | { type: "input_text"; text: string }
+  | {
+      type: "input_image"
+      image_url?: string
+      file_id?: string
+      detail?: "low" | "high" | "auto"
+    }
+  | {
+      type: "input_file"
+      file_id?: string
+      file_url?: string
+      file_data?: string
+      filename?: string
+    }
 
 // Content parts carried by an input *message* item. The text variant differs by
 // role: user/system/developer messages use `input_text`, assistant messages use
@@ -210,9 +226,11 @@ export interface ResponseOutputFunctionCall {
 }
 
 export interface ResponseUsage {
-  input_tokens: number
-  output_tokens: number
-  total_tokens: number
+  input_tokens?: number
+  output_tokens?: number
+  total_tokens?: number
+  input_tokens_details?: { cached_tokens?: number }
+  output_tokens_details?: { reasoning_tokens?: number }
 }
 
 // --- Streaming types ---
@@ -228,6 +246,7 @@ export interface ResponseStreamState {
   messageStarted: boolean
   nextSequenceNumber?: number
   terminalEmitted?: boolean
+  pendingResponse?: ResponseObject
   protocolError?: string
   usage?: ResponseUsage
   metadata?: Record<string, string>

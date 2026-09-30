@@ -88,7 +88,7 @@ describe("passive native Responses cache diagnostics", () => {
   test("observes the actual transformed body without changing requests or usage", async () => {
     const payload: ResponsesPayload = {
       model: "gpt-6-astra",
-      input: "私有上下文-must-not-be-logged",
+      input: "private-context-must-not-be-logged",
       prompt_cache_key: "private-cache-key",
       tools: [
         { type: "function", name: "tool", description: "", parameters: {} },

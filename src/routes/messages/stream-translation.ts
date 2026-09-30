@@ -4,6 +4,11 @@ import {
   type AnthropicStreamEventData,
   type AnthropicStreamState,
 } from "./anthropic-types"
+import {
+  formatMessagesUsage,
+  hasMessagesUsage,
+  readMessagesUsage,
+} from "./usage-translation"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 function isToolBlockOpen(state: AnthropicStreamState): boolean {
@@ -22,6 +27,22 @@ export function translateChunkToAnthropicEvents(
   state: AnthropicStreamState,
 ): Array<AnthropicStreamEventData> {
   const events: Array<AnthropicStreamEventData> = []
+  if (state.terminalEmitted) return events
+  const usage = readMessagesUsage(chunk.usage, "chat")
+  const observed = hasMessagesUsage(usage)
+  state.usage = readMessagesUsage(chunk.usage, "chat", state.usage)
+  if (state.pendingStopReason) {
+    if (
+      chunk.choices.some(
+        (choice) => choice.delta.content || choice.delta.tool_calls?.length,
+      )
+    )
+      return failAnthropicStream(
+        "Upstream sent content after finish_reason.",
+        state,
+      )
+    return observed ? finishAnthropicStream(state) : events
+  }
 
   if (chunk.choices.length === 0) {
     return events
@@ -42,15 +63,8 @@ export function translateChunkToAnthropicEvents(
         stop_reason: null,
         stop_sequence: null,
         usage: {
-          input_tokens:
-            (chunk.usage?.prompt_tokens ?? 0)
-            - (chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+          ...formatMessagesUsage(usage),
           output_tokens: 0, // Will be updated in message_delta when finished
-          ...(chunk.usage?.prompt_tokens_details?.cached_tokens
-            !== undefined && {
-            cache_read_input_tokens:
-              chunk.usage.prompt_tokens_details.cached_tokens,
-          }),
         },
       },
     })
@@ -151,31 +165,44 @@ export function translateChunkToAnthropicEvents(
       state.contentBlockOpen = false
     }
 
-    events.push(
-      {
-        type: "message_delta",
-        delta: {
-          stop_reason: mapOpenAIStopReasonToAnthropic(choice.finish_reason),
-          stop_sequence: null,
-        },
-        usage: {
-          input_tokens:
-            (chunk.usage?.prompt_tokens ?? 0)
-            - (chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-          output_tokens: chunk.usage?.completion_tokens ?? 0,
-          ...(chunk.usage?.prompt_tokens_details?.cached_tokens
-            !== undefined && {
-            cache_read_input_tokens:
-              chunk.usage.prompt_tokens_details.cached_tokens,
-          }),
-        },
-      },
-      {
-        type: "message_stop",
-      },
+    state.pendingStopReason = mapOpenAIStopReasonToAnthropic(
+      choice.finish_reason,
     )
+    if (observed) events.push(...finishAnthropicStream(state))
   }
 
+  return events
+}
+
+export function finishAnthropicStream(
+  state: AnthropicStreamState,
+): Array<AnthropicStreamEventData> {
+  if (state.terminalEmitted || !state.pendingStopReason) return []
+  state.terminalEmitted = true
+  return [
+    {
+      type: "message_delta",
+      delta: { stop_reason: state.pendingStopReason, stop_sequence: null },
+      usage: formatMessagesUsage(
+        state.usage ?? readMessagesUsage(undefined, "chat"),
+      ),
+    },
+    { type: "message_stop" },
+  ]
+}
+
+export function failAnthropicStream(
+  message: string,
+  state: AnthropicStreamState,
+): Array<AnthropicStreamEventData> {
+  if (state.terminalEmitted) return []
+  state.terminalEmitted = true
+  const events: Array<AnthropicStreamEventData> = []
+  if (state.contentBlockOpen) {
+    events.push({ type: "content_block_stop", index: state.contentBlockIndex })
+    state.contentBlockOpen = false
+  }
+  events.push({ type: "error", error: { type: "api_error", message } })
   return events
 }
 

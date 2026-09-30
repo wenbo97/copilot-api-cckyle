@@ -9,6 +9,7 @@ import type { ChatCompletionChunk } from "../src/services/copilot/create-chat-co
 import { translateToResponses } from "../src/routes/responses/non-stream-translation"
 import {
   translateChunkToResponseEvents,
+  finishResponseStream,
   translateStreamFailureToResponseEvents,
 } from "../src/routes/responses/stream-translation"
 
@@ -90,6 +91,7 @@ describe("synthetic Responses stream state machine", () => {
         state,
       ),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     const added = events.find(
@@ -152,6 +154,7 @@ describe("synthetic Responses stream state machine", () => {
         state,
       ),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     const added = events.find(
@@ -190,6 +193,7 @@ describe("synthetic Responses stream state machine", () => {
         state,
       ),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     const deltas = events.filter(
@@ -222,6 +226,7 @@ describe("synthetic Responses stream state machine", () => {
         state,
       ),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     const added = events.filter(
@@ -256,6 +261,7 @@ describe("synthetic Responses output ordering", () => {
       ),
       ...translateChunkToResponseEvents(chunk({ content: "after" }), state),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     const addedIndexes = events
@@ -284,6 +290,7 @@ describe("synthetic Responses output ordering", () => {
         state,
       ),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     expect(
@@ -319,6 +326,7 @@ describe("synthetic Responses output ordering", () => {
         state,
       ),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     const added = events.filter(
@@ -347,6 +355,7 @@ describe("synthetic Responses stream terminal state", () => {
       const events = [
         ...translateChunkToResponseEvents(chunk({ content: "partial" }), state),
         ...translateChunkToResponseEvents(chunk({}, finishReason), state),
+        ...finishResponseStream(state),
       ]
 
       const terminal = findTerminal(events)
@@ -366,6 +375,7 @@ describe("synthetic Responses stream terminal state", () => {
       ...translateChunkToResponseEvents(chunk({ content: "done" }), state),
       ...translateChunkToResponseEvents(chunk({}, "stop"), state),
       ...translateChunkToResponseEvents(chunk({}, "stop"), state),
+      ...finishResponseStream(state),
     ]
 
     expect(
@@ -395,6 +405,7 @@ describe("synthetic Responses stream terminal state", () => {
         state,
       ),
       ...translateChunkToResponseEvents(chunk({}, "tool_calls"), state),
+      ...finishResponseStream(state),
     ]
 
     const terminal = findTerminal(events)
@@ -410,9 +421,13 @@ describe("synthetic Responses stream terminal state", () => {
     }
     malformed.choices[0].finish_reason = "future_reason"
 
-    const terminal = findTerminal(
-      translateChunkToResponseEvents(malformed as ChatCompletionChunk, state),
-    )
+    const terminal = findTerminal([
+      ...translateChunkToResponseEvents(
+        malformed as ChatCompletionChunk,
+        state,
+      ),
+      ...finishResponseStream(state),
+    ])
     expect(terminal.type).toBe("response.failed")
     expect(terminal.response.error?.code).toBe("invalid_upstream_response")
   })
@@ -423,6 +438,7 @@ describe("synthetic Responses stream terminal state", () => {
       ...translateChunkToResponseEvents(chunk({ content: "a" }), state),
       ...translateChunkToResponseEvents(chunk({ content: "b" }), state),
       ...translateChunkToResponseEvents(chunk({}, "stop"), state),
+      ...finishResponseStream(state),
     ]
     const sequenceNumbers = events.map((event) => event.sequence_number)
     expect(sequenceNumbers).toEqual(
@@ -530,6 +546,7 @@ describe("synthetic Responses transport failures", () => {
         state,
       ),
       ...translateStreamFailureToResponseEvents("duplicate", state),
+      ...finishResponseStream(state),
     ]
 
     const terminals = events.filter((event) => event.type === "response.failed")

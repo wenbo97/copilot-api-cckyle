@@ -3,10 +3,15 @@ import type { ContentfulStatusCode } from "hono/utils/http-status"
 
 import consola from "consola"
 
-import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
+import {
+  describeHistoryRecovery,
+  type HistoryRecoverySummary,
+  ResponsesUpstreamError,
+} from "~/services/copilot/responses-upstream-error"
 
 export class HTTPError extends Error {
   response: Response
+  recovery?: HistoryRecoverySummary
 
   constructor(message: string, response: Response) {
     super(message)
@@ -33,9 +38,10 @@ export async function forwardError(c: Context, error: unknown) {
     return c.json(
       {
         error: {
-          message: error.message,
+          message: error.message + describeHistoryRecovery(error.recovery),
           type: "upstream_error",
           code: error.code,
+          ...(error.param ? { param: error.param } : {}),
         },
       },
       error.status as ContentfulStatusCode,
@@ -69,7 +75,7 @@ export async function forwardError(c: Context, error: unknown) {
     return c.json(
       {
         error: {
-          message: errorText,
+          message: errorText + describeHistoryRecovery(error.recovery),
           type: "error",
         },
       },

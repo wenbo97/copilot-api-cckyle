@@ -30,6 +30,8 @@ export function anthropicToolsToResponses(
     name: truncateToolName(tool.name),
     description: tool.description,
     parameters: tool.input_schema,
+    // Responses otherwise normalizes optional Anthropic fields into strict mode.
+    strict: tool.strict ?? false,
   }))
 }
 
