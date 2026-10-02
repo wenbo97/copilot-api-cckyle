@@ -1,3 +1,5 @@
+import type { ResponsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
+
 import {
   type CopilotStreamTimeouts,
   readCopilotHeaderTimeoutMs,
@@ -5,6 +7,7 @@ import {
 } from "./stream-lifecycle"
 
 export interface CopilotRequestOptions {
+  responsesDiagnostics?: ResponsesDiagnosticOrigin
   signal?: AbortSignal
   headerTimeoutMs?: number
   streamTimeouts?: CopilotStreamTimeouts

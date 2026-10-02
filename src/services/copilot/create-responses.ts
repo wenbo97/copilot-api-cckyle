@@ -54,13 +54,12 @@ export const createResponses = async (
       accountType: state.accountType,
     },
   )
-  const serializedBody = JSON.stringify(body)
   const diagnostics = ResponsesDiagnostics.start({
     ingress: payload,
     egress: body,
-    serializedBody,
     signal: options.signal,
     cachePolicy,
+    origin: options.responsesDiagnostics,
   })
 
   const extraHeaders: Record<string, string> = {
@@ -74,7 +73,7 @@ export const createResponses = async (
       extraHeaders,
       {
         ...options,
-        onAttempt: diagnostics ? () => diagnostics.recordAttempt() : undefined,
+        observer: diagnostics?.attemptObserver(),
       },
     )
     if (Symbol.asyncIterator in response) {

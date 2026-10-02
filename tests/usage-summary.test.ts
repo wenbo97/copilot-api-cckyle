@@ -146,7 +146,7 @@ test.each(["utf8", "utf16le"] as const)(
     expect(result.code).toBe(0)
     const report: unknown = JSON.parse(result.stdout)
     expect(report).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       parsing: { duplicate_records: 1, malformed_records: 1 },
       overall: {
         records: 3,
@@ -181,3 +181,129 @@ test.each(["utf8", "utf16le"] as const)(
   },
   30_000,
 )
+
+test("separates actual attempts from final responses and keeps old ingress unknown", async () => {
+  const file = await fixture(
+    entry("legacy", {
+      upstream_attempts: 2,
+      input_tokens: 100,
+      cached_input_tokens: 80,
+      copilot_nano_aiu: 10,
+    })
+      + entry("bridge", {
+        schema_version: 2,
+        source: "messages_to_responses",
+        upstream_attempts: 2,
+        input_tokens: 100,
+        cached_input_tokens: 70,
+        copilot_nano_aiu: 20,
+        attempt_details: [
+          {
+            attempt_index: 1,
+            input_tokens: 100,
+            cached_input_tokens: 80,
+            copilot_nano_aiu: 10,
+          },
+          {
+            attempt_index: 2,
+            input_tokens: 100,
+            cached_input_tokens: 70,
+            copilot_nano_aiu: 20,
+          },
+        ],
+      })
+      + '2026-09-29T10:00:00Z [info] [messages-usage] {"request_id":"bridge","total_input_tokens":100}\n',
+  )
+  const result = await run(file, "--json")
+  expect(result.code).toBe(0)
+  expect(JSON.parse(result.stdout) as unknown).toMatchObject({
+    schema_version: 2,
+    scope: "responses_egress",
+    overall: {
+      records: 2,
+      metrics: {
+        input_tokens: { observed_sum: 200 },
+        copilot_nano_aiu: { observed_sum: 30 },
+      },
+      attempt_usage: {
+        records_with_details: 1,
+        detailed_attempts: 2,
+        total_reported_attempts: 4,
+        attempt_count_coverage: 1,
+        metrics: {
+          input_tokens: { observed_sum: 200, known_attempts: 2, coverage: 0.5 },
+          copilot_nano_aiu: {
+            observed_sum: 30,
+            known_attempts: 2,
+            coverage: 0.5,
+          },
+        },
+        cache: { hit_ratio: 0.75, known_attempts: 2, coverage: 0.5 },
+      },
+    },
+    by_source: {
+      unknown_ingress: { records: 1 },
+      messages_to_responses: { records: 1 },
+    },
+  })
+}, 30_000)
+
+test("deduplicates attempt indices and preserves unknown attempt-count coverage", async () => {
+  const file = await fixture(
+    entry("known", {
+      schema_version: 2,
+      source: "native_responses",
+      upstream_attempts: 2,
+      attempt_details: [
+        {
+          attempt_index: 1,
+          input_tokens: 999,
+          cached_input_tokens: 999,
+          copilot_nano_aiu: 999,
+        },
+        {
+          attempt_index: 1,
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          copilot_nano_aiu: 0,
+        },
+        {
+          attempt_index: 2,
+          input_tokens: 10,
+          cached_input_tokens: 11,
+          copilot_nano_aiu: -1,
+        },
+        { attempt_index: 0, input_tokens: 999, copilot_nano_aiu: 999 },
+        { attempt_index: 3, input_tokens: 999, copilot_nano_aiu: 999 },
+      ],
+    }) + entry("unknown", { upstream_attempts: null }),
+  )
+  const result = await run(file, "--json")
+  expect(result.code).toBe(0)
+  expect(JSON.parse(result.stdout) as unknown).toMatchObject({
+    overall: {
+      attempt_usage: {
+        detailed_attempts: 2,
+        attempt_count_coverage: 0.5,
+        metrics: {
+          input_tokens: {
+            observed_sum: 110,
+            known_attempts: 2,
+            coverage: null,
+          },
+          cached_input_tokens: {
+            observed_sum: 0,
+            known_attempts: 1,
+            coverage: null,
+          },
+          copilot_nano_aiu: {
+            observed_sum: 0,
+            known_attempts: 1,
+            coverage: null,
+          },
+        },
+        cache: { hit_ratio: 0, known_attempts: 1, coverage: null },
+      },
+    },
+  })
+}, 30_000)

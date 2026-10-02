@@ -7,6 +7,7 @@ import { awaitApproval } from "~/lib/approval"
 import { pickEgress } from "~/lib/endpoint-router"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { responsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
 import {
@@ -255,6 +256,8 @@ async function handleCompletionViaResponses(
     `[Anthropic→Responses] Using model: "${payload.model}" (responses bridge)`,
   )
 
+  const origin = responsesDiagnosticOrigin("messages", payload)
+  diagnostics.setRequestId(origin?.requestId)
   const responsesPayload = translateAnthropicToResponses(payload)
 
   const traceTimestamp = await traceRequest({
@@ -266,7 +269,10 @@ async function handleCompletionViaResponses(
   if (state.manualApprove) await awaitApproval()
 
   const requestOptions = copilotRequestOptions(c.req.raw.signal)
-  const response = await createResponses(responsesPayload, requestOptions)
+  const response = await createResponses(responsesPayload, {
+    ...requestOptions,
+    responsesDiagnostics: origin,
+  })
 
   if (isResponsesNonStreaming(response)) {
     const anthropicResponse = translateResponsesToAnthropic(

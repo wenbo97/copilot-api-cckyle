@@ -14,6 +14,11 @@ import type { CopilotRequestOptions } from "./request-options"
 
 import { copilotFetch } from "./copilot-fetch"
 import { readCopilotErrorDetail } from "./input-connection-error"
+import {
+  type CopilotFetchObserver,
+  observeRequest,
+  type ResponsesAttemptObserver,
+} from "./request-observer"
 import { ResponsesHistoryRegistry } from "./responses-history-registry"
 import {
   type HistoryRecoverySummary,
@@ -30,6 +35,7 @@ interface Attempt {
 
 interface HistoryRequestOptions extends CopilotRequestOptions {
   onAttempt?: () => void
+  observer?: ResponsesAttemptObserver
 }
 
 // Keep retry state private to one request. Once any Responses event is yielded,
@@ -39,7 +45,7 @@ class HistoryRequest {
   private readonly headers: Record<string, string>
   private readonly options: HistoryRequestOptions
   private readonly registry = new ResponsesHistoryRegistry()
-  private readonly requestId = randomUUID()
+  private readonly requestId: string
   private retried = false
   private forwarded = false
   private readonly recovery: HistoryRecoverySummary = {
@@ -55,6 +61,7 @@ class HistoryRequest {
     this.body = body
     this.headers = headers
     this.options = options
+    this.requestId = options.observer?.requestId ?? randomUUID()
   }
 
   async run(): Promise<
@@ -129,16 +136,19 @@ class HistoryRequest {
           )
         : undefined
       try {
+        const serializedBody = JSON.stringify(this.body)
         const response = await copilotFetch("/responses", {
           method: "POST",
-          body: JSON.stringify(this.body),
+          body: serializedBody,
           extraHeaders: this.headers,
           signal: lifecycle?.signal ?? this.options.signal,
           headerTimeoutMs: this.options.headerTimeoutMs,
           onAttempt: this.options.onAttempt,
+          observer: this.fetchObserver(serializedBody),
         })
         return { response, lifecycle }
       } catch (error) {
+        this.observeFailure(error)
         lifecycle?.dispose(error)
         // A retry can fail differently (e.g. 503). Once SSE has started, the
         // HTTP forwarder cannot read that response, so preserve its cause here.
@@ -166,11 +176,13 @@ class HistoryRequest {
     let attempt = first
     for (;;) {
       const value = (await attempt.response.json()) as ResponseObject
+      this.observeValue(value)
       const error = responsesUpstreamError(value)
       if (!error) {
         await this.registry.remember(value)
         return value
       }
+      this.observeFailure(error)
       if (!(await this.recover(error))) throw error
       attempt = await this.open()
     }
@@ -180,6 +192,7 @@ class HistoryRequest {
     this.options.signal?.throwIfAborted()
     if (!event.data || event.data === "[DONE]") return
     const value = parseResponsesJson(event.data)
+    this.observeValue(value)
     const error = responsesUpstreamError(value)
     const eventType = (value as { type?: unknown } | undefined)?.type
     // Preserve official upstream failures, except for the precise failure
@@ -207,12 +220,42 @@ class HistoryRequest {
         }
         return
       } catch (error) {
+        this.observeFailure(error)
         if (!(await this.recover(error))) throw error
       } finally {
         lifecycle.dispose()
       }
       attempt = await this.open()
     }
+  }
+
+  private fetchObserver(
+    serializedBody: string,
+  ): CopilotFetchObserver | undefined {
+    const observer = this.options.observer
+    if (!observer) return
+    return {
+      start: (cause) => {
+        if (cause === "auth_refresh") observer.start(serializedBody, cause)
+        else
+          observer.start(
+            serializedBody,
+            this.recovery.attempted ? "history_recovery" : "initial",
+          )
+      },
+      headers: (status) => observer.headers(status),
+      failure: (error) => observer.failure(error),
+    }
+  }
+
+  private observeValue(value: unknown): void {
+    const observer = this.options.observer
+    if (observer) observeRequest(() => observer.value(value))
+  }
+
+  private observeFailure(error: unknown): void {
+    const observer = this.options.observer
+    if (observer) observeRequest(() => observer.failure(error))
   }
 }
 

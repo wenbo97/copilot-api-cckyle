@@ -14,19 +14,22 @@ type MetricName = (typeof metricNames)[number]
 type Count = number | null
 interface Sample {
   model: string
+  source: "native_responses" | "messages_to_responses" | "unknown_ingress"
   outcome: string
   attempts: Count
   metrics: Record<MetricName, Count>
+  attemptDetailsAvailable: boolean
+  attemptDetails: Array<Record<MetricName, Count>>
 }
 interface Range {
   since?: number
   until?: number
 }
 
-const scope = "native_responses"
+const scope = "responses_egress"
 const limitations = [
-  "Only native Responses diagnostic records in the selected range are included; coverage does not represent all service requests.",
-  "Observed usage may omit earlier retry attempts; it is not complete task usage or a verified account deduction.",
+  "Only Responses egress diagnostic records in the selected range are included; coverage does not represent all service requests. Legacy ingress remains unknown.",
+  "Final-response and attempt observations are separate views; never add their costs together. Missing retry usage remains unknown, not a verified account deduction.",
   "Reasoning and cached tokens are details; do not add them again to their output or input totals.",
 ]
 
@@ -50,15 +53,11 @@ function parseSample(text: string): { id: string; sample: Sample } | undefined {
     || !body.model
   )
     return
-  const metrics = Object.fromEntries(
-    metricNames.map((name) => [name, count(body[name])]),
-  ) as Record<MetricName, Count>
-  if (
-    metrics.input_tokens !== null
-    && metrics.cached_input_tokens !== null
-    && metrics.cached_input_tokens > metrics.input_tokens
-  )
-    metrics.cached_input_tokens = null
+  const metrics = readMetrics(body)
+  const attempts = count(body.upstream_attempts)
+  const attemptDetailsAvailable =
+    body.schema_version === 2 && Array.isArray(body.attempt_details)
+  const source = body.schema_version === 2 ? body.source : undefined
   const outcomes = [
     "completed",
     "incomplete",
@@ -71,14 +70,54 @@ function parseSample(text: string): { id: string; sample: Sample } | undefined {
     id: body.request_id,
     sample: {
       model: body.model,
+      source:
+        source === "native_responses" || source === "messages_to_responses" ?
+          source
+        : "unknown_ingress",
       outcome:
         typeof body.outcome === "string" && outcomes.includes(body.outcome) ?
           body.outcome
         : "unknown",
-      attempts: count(body.upstream_attempts),
+      attempts,
       metrics,
+      attemptDetailsAvailable,
+      attemptDetails:
+        attemptDetailsAvailable ?
+          parseAttemptDetails(body.attempt_details, attempts)
+        : [],
     },
   }
+}
+
+function readMetrics(body: Record<string, unknown>): Record<MetricName, Count> {
+  const metrics = Object.fromEntries(
+    metricNames.map((name) => [name, count(body[name])]),
+  ) as Record<MetricName, Count>
+  if (
+    metrics.input_tokens !== null
+    && metrics.cached_input_tokens !== null
+    && metrics.cached_input_tokens > metrics.input_tokens
+  )
+    metrics.cached_input_tokens = null
+  return metrics
+}
+
+function parseAttemptDetails(
+  value: unknown,
+  attempts: Count,
+): Array<Record<MetricName, Count>> {
+  if (!Array.isArray(value)) return []
+  const unique = new Map<number, Record<MetricName, Count>>()
+  for (const candidate of value.slice(0, 16)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      continue
+    const body = candidate as Record<string, unknown>
+    const index = count(body.attempt_index)
+    if (index === null || index === 0) continue
+    if (attempts !== null && index > attempts) continue
+    unique.set(index, readMetrics(body))
+  }
+  return [...unique.values()]
 }
 
 function measure(values: Array<Count>) {
@@ -128,6 +167,60 @@ function summarize(samples: Array<Sample>) {
       known_records: cacheSamples.length,
       coverage:
         samples.length > 0 ? cacheSamples.length / samples.length : null,
+    },
+    attempt_usage: summarizeAttempts(samples),
+  }
+}
+
+function summarizeAttempts(samples: Array<Sample>) {
+  const totals = measure(samples.map((sample) => sample.attempts))
+  const details = samples.flatMap((sample) => sample.attemptDetails)
+  const denominator =
+    totals.observed_sum === null ? null : Number(totals.observed_sum)
+  const coverage = (known: number) =>
+    (
+      totals.known_records === samples.length
+      && denominator !== null
+      && denominator > 0
+    ) ?
+      known / denominator
+    : null
+  const cache = details.filter(
+    (metrics) =>
+      metrics.input_tokens !== null && metrics.cached_input_tokens !== null,
+  )
+  const input = cache.reduce(
+    (sum, metrics) => sum + BigInt(metrics.input_tokens ?? 0),
+    0n,
+  )
+  const cached = cache.reduce(
+    (sum, metrics) => sum + BigInt(metrics.cached_input_tokens ?? 0),
+    0n,
+  )
+  return {
+    records_with_details: samples.filter(
+      (sample) => sample.attemptDetailsAvailable,
+    ).length,
+    detailed_attempts: details.length,
+    total_reported_attempts: totals.observed_sum,
+    attempt_count_coverage: totals.coverage,
+    metrics: Object.fromEntries(
+      metricNames.map((name) => {
+        const observed = measure(details.map((metrics) => metrics[name]))
+        return [
+          name,
+          {
+            observed_sum: observed.observed_sum,
+            known_attempts: observed.known_records,
+            coverage: coverage(observed.known_records),
+          },
+        ]
+      }),
+    ),
+    cache: {
+      hit_ratio: input > 0n ? Number(cached) / Number(input) : null,
+      known_attempts: cache.length,
+      coverage: coverage(cache.length),
     },
   }
 }
@@ -241,7 +334,29 @@ function formatGroup(
   lines.push(
     `Weighted cache hit rate: ${percent(group.cache.hit_ratio)}; cache usage coverage ${percent(group.cache.coverage)}`,
   )
+  const attempts = group.attempt_usage
+  lines.push(
+    `Attempt observations: ${attempts.detailed_attempts}/${attempts.total_reported_attempts ?? "unknown"} details; attempt-count coverage ${percent(attempts.attempt_count_coverage)}`,
+  )
+  for (const [metric, value] of Object.entries(attempts.metrics))
+    lines.push(
+      `Attempt ${metric}: ${value.observed_sum ?? "unknown"}; known ${value.known_attempts}; coverage ${percent(value.coverage)}`,
+    )
   return lines.join("\n")
+}
+
+function groupSamples(samples: Array<Sample>, key: "model" | "source") {
+  const groups = new Map<string, Array<Sample>>()
+  for (const sample of samples) {
+    const group = groups.get(sample[key]) ?? []
+    group.push(sample)
+    groups.set(sample[key], group)
+  }
+  return Object.fromEntries(
+    [...groups.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, group]) => [name, summarize(group)]),
+  )
 }
 
 async function main() {
@@ -276,24 +391,16 @@ async function main() {
     positionals[0] ?? "tmps/cache-session.log",
     range,
   )
-  const models = new Map<string, Array<Sample>>()
-  for (const sample of samples) {
-    const group = models.get(sample.model) ?? []
-    group.push(sample)
-    models.set(sample.model, group)
-  }
   const overall = summarize(samples)
-  const byModel = Object.fromEntries(
-    [...models.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, group]) => [name, summarize(group)]),
-  )
+  const byModel = groupSamples(samples, "model")
+  const bySource = groupSamples(samples, "source")
   const report = {
-    schema_version: 1,
+    schema_version: 2,
     scope,
     period: { since: values.since ?? null, until: values.until ?? null },
     overall,
     by_model: byModel,
+    by_source: bySource,
     parsing,
     limitations,
   }
@@ -303,12 +410,15 @@ async function main() {
   }
   console.log(
     [
-      "Native Responses - Observed usage",
+      "Responses egress - Observed usage",
       ...limitations,
       `Time range: ${values.since ?? "unbounded"} to ${values.until ?? "unbounded"} (end exclusive)`,
       ...(samples.length > 0 ? [] : ["No data"]),
       formatGroup("Overall", overall),
       ...Object.entries(byModel).map(([name, group]) =>
+        formatGroup(name, group),
+      ),
+      ...Object.entries(bySource).map(([name, group]) =>
         formatGroup(name, group),
       ),
       `Parsing statistics: ${JSON.stringify(parsing)}`,

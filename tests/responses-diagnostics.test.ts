@@ -11,7 +11,10 @@ import consola from "consola"
 
 import type { ResponsesPayload } from "~/routes/responses/responses-types"
 
-import { ResponsesDiagnostics } from "~/lib/responses-diagnostics"
+import {
+  ResponsesDiagnostics,
+  responsesDiagnosticOrigin,
+} from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
 import { createResponses } from "~/services/copilot/create-responses"
 
@@ -72,7 +75,199 @@ function nativeResponse(usage?: unknown) {
   }
 }
 
+test("Messages ingress fingerprints include system and fixed thinking configuration", () => {
+  const base = {
+    model: "gpt-6-astra",
+    system: "synthetic-private-system-a",
+    tools: [{ name: "synthetic_tool", input_schema: { type: "object" } }],
+    messages: [{ role: "user", content: "synthetic-question-a" }],
+    thinking: { type: "adaptive" },
+    output_config: { effort: "low" },
+  }
+  for (const ingress of [
+    base,
+    { ...base, system: "synthetic-private-system-b" },
+    { ...base, output_config: { effort: "high" } },
+    { ...base, messages: [{ role: "user", content: "synthetic-question-b" }] },
+  ]) {
+    ResponsesDiagnostics.start({
+      ingress,
+      egress: { model: "gpt-6-astra", input: "Synthetic transformed request" },
+      origin: responsesDiagnosticOrigin("messages", ingress),
+    })?.finish()
+  }
+  const [first, changedSystem, changedEffort, changedQuestion] = logs()
+  expect(first.ingress_static_prefix).not.toEqual(
+    changedSystem.ingress_static_prefix,
+  )
+  expect(first.ingress_static_prefix).not.toEqual(
+    changedEffort.ingress_static_prefix,
+  )
+  expect(first.ingress_static_prefix).toEqual(
+    changedQuestion.ingress_static_prefix,
+  )
+  expect(first.ingress_fingerprints).not.toEqual(
+    changedQuestion.ingress_fingerprints,
+  )
+  const serialized = JSON.stringify(logs())
+  expect(serialized).not.toContain("synthetic-private-system")
+  expect(serialized).not.toContain("synthetic-question")
+})
+
+test("a Messages system block array without tools still has an observable static prefix", () => {
+  const ingress = {
+    model: "gpt-6-astra",
+    system: [{ type: "text", text: "synthetic-private-system-block" }],
+    messages: [{ role: "user", content: "Synthetic dynamic question" }],
+  }
+  ResponsesDiagnostics.start({
+    ingress,
+    egress: { model: "gpt-6-astra", input: "Synthetic transformed request" },
+    origin: responsesDiagnosticOrigin("messages", ingress),
+  })?.finish()
+  const prefix = logs()[0].ingress_static_prefix
+  expect(prefix).toHaveProperty("input_form", "array")
+  expect(prefix).toHaveProperty("boundary", "before_dynamic_input")
+  expect(prefix).toHaveProperty("fingerprint")
+  expect(JSON.stringify(prefix)).not.toContain('"fingerprint":null')
+  expect(JSON.stringify(logs())).not.toContain("synthetic-private-system-block")
+})
+
+test("bounds original caller marker paths and ignores cache-looking schema properties", () => {
+  const payload = {
+    model: "gpt-5.6-luna",
+    tools: [
+      {
+        name: "read",
+        input_schema: {
+          type: "object",
+          properties: { cache_control: { type: "string" } },
+        },
+      },
+    ],
+    messages: [
+      {
+        role: "user",
+        content: Array.from({ length: 40 }, () => ({
+          type: "text",
+          text: "private-text",
+          cache_control: { type: "ephemeral" },
+        })),
+      },
+    ],
+  }
+  ResponsesDiagnostics.start({
+    ingress: payload,
+    egress: { model: payload.model, input: [] },
+    origin: responsesDiagnosticOrigin("messages", payload),
+  })?.finish()
+  expect(logs()[0].cache_intent).toMatchObject({
+    marker_count: 40,
+    truncated: true,
+    malformed_or_unknown: false,
+  })
+  const intent = logs()[0].cache_intent as { paths: Array<string> }
+  expect(intent.paths).toHaveLength(32)
+  expect(intent.paths.at(-1)).toBe("messages[0].content[31].cache_control")
+  expect(JSON.stringify(logs())).not.toContain("private-")
+})
+
 describe("passive native Responses cache diagnostics", () => {
+  test("distinguishes preserved static prefixes from changed dynamic suffixes", () => {
+    const base = {
+      model: "gpt-5.6-luna",
+      instructions: "private stable instructions",
+      tools: [{ type: "function", name: "private_tool", parameters: {} }],
+      reasoning: { effort: "low" },
+      input: [
+        { role: "system", content: "private system" },
+        { role: "developer", content: "private stable prefix" },
+        { role: "user", content: "private dynamic question" },
+      ],
+    }
+    const suffix = {
+      ...base,
+      input: [
+        ...base.input.slice(0, 2),
+        { role: "user", content: "new suffix" },
+      ],
+    }
+    const changedPrefix = {
+      ...base,
+      input: [
+        base.input[0],
+        { role: "developer", content: "changed prefix" },
+        base.input[2],
+      ],
+    }
+    for (const payload of [
+      base,
+      suffix,
+      changedPrefix,
+      { ...base, tools: [] },
+    ]) {
+      ResponsesDiagnostics.start({
+        ingress: payload,
+        egress: payload,
+        serializedBody: JSON.stringify(payload),
+      })?.finish()
+    }
+    const [first, second, third, fourth] = logs()
+    expect(first.egress_static_prefix).toMatchObject({
+      input_items: 2,
+      boundary: "before_dynamic_input",
+      scope: "process",
+    })
+    expect(first.egress_static_prefix).toEqual(second.egress_static_prefix)
+    expect(first.egress_fingerprints).not.toEqual(second.egress_fingerprints)
+    expect(first.egress_static_prefix).not.toEqual(third.egress_static_prefix)
+    expect(first.egress_static_prefix).not.toEqual(fourth.egress_static_prefix)
+    expect(JSON.stringify(logs())).not.toContain("private")
+    expect(base.input[2].content).toBe("private dynamic question")
+  })
+
+  test("keeps scalar and message-array prefix observations distinct", () => {
+    const base = { model: "gpt-5.6-luna", instructions: "static instructions" }
+    for (const input of ["question", [{ role: "user", content: "question" }]]) {
+      const payload = { ...base, input }
+      ResponsesDiagnostics.start({
+        ingress: payload,
+        egress: payload,
+        serializedBody: JSON.stringify(payload),
+      })?.finish()
+    }
+    expect(logs()[0].egress_static_prefix).toMatchObject({
+      input_form: "string",
+      input_items: 0,
+    })
+    expect(logs()[1].egress_static_prefix).toMatchObject({
+      input_form: "array",
+      input_items: 0,
+    })
+    expect(logs()[0].egress_static_prefix).not.toEqual(
+      logs()[1].egress_static_prefix,
+    )
+  })
+
+  test("does not call assistant or tool history a leading static prefix", () => {
+    const payload = {
+      input: [
+        { role: "developer", content: "static" },
+        { type: "function_call_output", call_id: "opaque", output: "dynamic" },
+        { role: "developer", content: "later dynamic instructions" },
+      ],
+    }
+    ResponsesDiagnostics.start({
+      ingress: payload,
+      egress: payload,
+      serializedBody: JSON.stringify(payload),
+    })?.finish()
+    expect(logs()[0].egress_static_prefix).toMatchObject({
+      input_items: 1,
+      boundary: "before_dynamic_input",
+    })
+  })
+
   test("is disabled by default", () => {
     delete process.env.COPILOT_CACHE_DIAGNOSTICS
     expect(
@@ -348,3 +543,58 @@ async function* incompleteSource() {
   })
   yield { data: "[DONE]" }
 }
+
+test("a completed-looking snapshot on a nonterminal frame does not complete an attempt", () => {
+  const payload = { model: "gpt-6-astra", input: "question", stream: true }
+  const diagnostics = ResponsesDiagnostics.start({
+    ingress: payload,
+    egress: payload,
+  })
+  if (!diagnostics) throw new Error("Expected enabled diagnostics")
+  const observer = diagnostics.attemptObserver()
+  observer.start(JSON.stringify(payload), "initial")
+  observer.headers(200)
+  observer.value({ type: "response.created", response: nativeResponse() })
+  diagnostics.finish()
+  expect(logs()[0]).toMatchObject({
+    attempt_details: [{ outcome: "stream_ended_without_terminal" }],
+  })
+})
+
+test("caps attempt details without losing the total or overwriting the last retained attempt", () => {
+  const payload = { model: "gpt-6-astra", input: "private-bounded-fixture" }
+  const diagnostics = ResponsesDiagnostics.start({
+    ingress: payload,
+    egress: payload,
+    serializedBody: JSON.stringify(payload),
+  })
+  if (!diagnostics) throw new Error("Expected enabled diagnostics")
+  const observer = diagnostics.attemptObserver()
+  for (let index = 0; index < 17; index++) {
+    observer.start(JSON.stringify(payload), "initial")
+    observer.headers(index === 16 ? 503 : 200)
+    observer.value(
+      nativeResponse({
+        input_tokens: 100,
+        input_tokens_details: { cached_tokens: 80 },
+        output_tokens: 2,
+      }),
+    )
+  }
+  diagnostics.finish()
+  diagnostics.finish()
+  expect(logs()).toHaveLength(1)
+  expect(logs()[0]).toMatchObject({
+    upstream_attempts: 17,
+    attempt_details_truncated: true,
+  })
+  const details = logs()[0].attempt_details as Array<Record<string, unknown>>
+  expect(details).toHaveLength(16)
+  expect(details.at(-1)).toMatchObject({
+    attempt_index: 16,
+    http_status: 200,
+    outcome: "completed",
+    cached_input_tokens: 80,
+  })
+  expect(JSON.stringify(logs())).not.toContain("private-")
+})

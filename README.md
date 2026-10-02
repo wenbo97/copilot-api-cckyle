@@ -183,7 +183,8 @@ restarts. The generated key hashes this scope, endpoint/account type, model,
 instructions, tools, and fixed generation configuration. It never hashes the
 growing history, includes credentials, or changes randomly per request.
 Existing client keys, including explicit null values, are preserved. The key
-helps cache routing; it is not an access-control or session identifier.
+is a model-dependent routing/accounting hint; it does not force a hit and is
+not an access-control or session identifier.
 
 The policy is limited to native `/responses` requests for `gpt-6-astra`,
 `gpt-5.6-sol`, `gpt-5.6-sol-fast`, `gpt-5.6-terra`, and `gpt-5.6-luna`.
@@ -212,7 +213,8 @@ Set `COPILOT_CACHE_POLICY=off` to roll back.
 ### Passive cache measurements
 
 Set `COPILOT_CACHE_DIAGNOSTICS=1` when starting the proxy to emit one
-`[cache-diagnostics]` JSON summary per native `/responses` request. This makes
+`[cache-diagnostics]` JSON summary per logical `/responses` egress request,
+including Messages-to-Responses bridges. This makes
 no additional model requests and does not require `--trace`. The summary
 contains upstream attempts, input/output tokens, cache reads/writes when
 reported, Copilot-reported nano-AIU, request body size, and latency. Missing
@@ -227,20 +229,65 @@ Also report the fraction of records with known values for each metric. Keep resu
 by model; cache hit rate alone does not establish a reduction in task cost.
 Copilot-reported nano-AIU is not an independently verified account deduction.
 
-Ingress and final egress fingerprints preserve array order and use a random
+Ingress and prepared egress fingerprints preserve array order and use a random
 process-local HMAC key. They do not contain prompt text, raw cache keys, or
 credentials, and cannot be compared across process restarts. Fingerprint
 changes are not token-level cache measurements. Requests remain explicitly
 `uncorrelated` with an `unknown` task role until a reliable thread identifier
 is available: sharing a cache key does not establish a shared thread.
 
+Version 2 summaries distinguish `source: native_responses` from
+`messages_to_responses`, and include `ingress_protocol` and `egress_endpoint`.
+The internal `request_id` groups attempts of one logical call, not a session.
+Messages bridge `[messages-usage]` records carry the same ID; they describe
+translated counters and must not be added to upstream billing.
+
+`cache_intent` records original caller hint presence, marker count, up to 32
+protocol field paths, explicit TTL presence, and malformed/unknown options.
+It does not log hint values or walk tool schemas and arguments. Messages hints
+lost in conversion are labelled `cache_hint_not_portable`. This observation
+does not translate TTLs, reject requests, or change `off`/`prefix-v1` behavior.
+Native `observed` intent does not establish upstream acceptance or a cache hit.
+
+Top-level egress fingerprints describe `egress_snapshot: prepared_request`,
+before history recovery. `attempt_details` instead fingerprint each body
+actually sent and record its byte size, cause (`initial`, `auth_refresh`, or
+`history_recovery`), HTTP status, outcome and observed usage. `http_status` is
+the transport status; `upstream_error_status` separately records an error
+embedded in an otherwise successful HTTP response. Details are capped at 16;
+`attempt_details_truncated` flags omitted details while `upstream_attempts`
+retains the full count. `diagnostics_incomplete` indicates an observation failure.
+Missing usage remains unknown. Cumulative events update one attempt rather
+than adding repeated counters, and a retry starts with fresh unknown usage.
+
+`ingress_static_prefix` and `egress_static_prefix` separately fingerprint the
+instructions, tools, fixed model/reasoning settings, and leading
+system/developer/additional-tools items. Scanning stops at the first dynamic
+user, assistant, or tool-history item. The summary includes the leading item
+count, input representation and boundary; it does not estimate prefix tokens
+or certify a cache hit. Within one process, an unchanged prefix fingerprint
+with a changed whole-input fingerprint shows that the selected leading context
+stayed structurally equal while other input changed. It does not establish
+that earlier user or tool history was preserved.
+Messages ingress uses its original `system`, `messages`, `thinking`, and
+`output_config` fields for these diagnostic fingerprints. This normalization
+is internal to observation and does not change the forwarded request.
+
+For reusable requests, keep instructions, reference material, tool order and
+definitions stable; put the changing question after them and preserve earlier
+history when appending turns. Avoid injecting timestamps or per-request IDs
+before that prefix. Keep model, reasoning level and output schema fixed within
+an experiment. Identical outputs do not establish input-cache reuse. Measure
+cache reads, cache writes and output together, including the initial write;
+account-credit changes are a separate observation.
+
 `ttft_ms` measures the first nonempty streamed text, function-argument, or
 custom-tool-input delta;
 reasoning-only frames do not count. It is `null` for non-streaming requests.
 Timing starts after request compatibility transforms, before the upstream call;
 it excludes earlier inbound handling, rate-limit waits, and manual approval.
-This initial observer covers native Responses only, including Messages requests
-that use that egress. It does not yet provide cross-turn history comparisons or
+This observer covers Responses egress only, including Messages requests
+that use that egress. It does not provide production cross-turn history state or
 a complete per-task cost report.
 
 #### Messages bridge usage
@@ -283,11 +330,21 @@ bun run usage:summary tmps/cache-session.log --json
 The default input is `tmps/cache-session.log`. The command reads UTF-8 and
 BOM-marked UTF-16LE logs without making network requests. It reports observed
 usage, per-metric coverage, outcome counts, attempts, retries, and token-weighted
-cache hit rates, overall and by model. These are native Responses egress records
+cache hit rates, overall, by model, and by ingress source. These are Responses egress records
 (including Messages using that egress), not all incoming requests or complete
 task costs. Earlier attempts may have unreported usage; nano-AIU is not proof
 of an account deduction. Reasoning and cached tokens are details, not additional
 tokens to add to their respective output/input totals.
+
+The JSON report uses `schema_version: 2` and `scope: responses_egress`, while
+still reading old logs. Old records without explicit version-2 provenance are
+grouped as `unknown_ingress`; `/responses` alone does not identify their client.
+Existing `metrics` describe final responses. Separate `attempt_usage` totals
+describe observed individual attempts, with coverage against reported attempt
+counts (unknown if those counts are incomplete). Never add costs across these
+two views. Missing or truncated details lower coverage; they do not imply zero
+cost. Duplicate attempt indices contribute once, and Messages usage logs are
+not parsed as upstream billing records.
 
 Time filters require ISO8601 timestamps with a timezone; the interval includes
 `--since` and excludes `--until`. Without filters the whole file is analyzed.
