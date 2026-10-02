@@ -6,8 +6,13 @@ const MARKER = "LOCAL_TOOL_42"
 export function textEvidence(value: unknown): Json {
   let text = JSON.stringify(value ?? null)
   if (typeof value === "string") text = value
-  else if (Array.isArray(value))
-    text = value.map((part) => stringValue(record(part).text)).join("\n")
+  else if (Array.isArray(value)) {
+    const parts: Array<unknown> = value.flatMap(
+      (part: unknown): Array<unknown> =>
+        Array.isArray(part) ? (part as Array<unknown>) : [part],
+    )
+    text = parts.map((part) => stringValue(record(part).text)).join("\n")
+  }
   return {
     characters: text.length,
     markerPresent: text.includes(MARKER),

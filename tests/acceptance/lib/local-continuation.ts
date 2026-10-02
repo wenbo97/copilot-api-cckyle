@@ -9,6 +9,8 @@ import {
 import path from "node:path"
 
 import { BudgetLedger, record, type Reservation } from "./local-budget"
+import { readCacheAuthorization } from "./local-cache-authorization"
+import { readE2eAuthorization } from "./local-e2e-authorization"
 import { LiveTime } from "./local-live-time"
 import {
   assertMatrixScope,
@@ -214,7 +216,9 @@ function validateAuthorization(
     || typeof saved.roundId !== "string"
     || !/^[a-z0-9][a-z0-9-]{0,79}$/u.test(saved.roundId)
     || saved.budgetDirectory !== budgetDirectory
-    || (saved.version !== 2 && saved.model !== "gpt-5.6-luna")
+    || (saved.version !== 2
+      && saved.version !== 4
+      && saved.model !== "gpt-5.6-luna")
     || saved.effort !== "low"
     || typeof saved.priorLedgerSha256 !== "string"
     || !/^[a-f0-9]{64}$/u.test(saved.priorLedgerSha256)
@@ -291,8 +295,24 @@ function openAuthorizedRound(
   )
   validateAuthorization(saved, budgetDirectory)
   const roundId = String(saved.roundId)
-  const matrix =
-    saved.version === 2 ? readMatrixAuthorization(saved) : undefined
+  let matrix: MatrixAuthorization | undefined
+  switch (saved.version) {
+    case 4: {
+      matrix = readE2eAuthorization(saved)
+      break
+    }
+    case 3: {
+      matrix = readCacheAuthorization(saved)
+      break
+    }
+    case 2: {
+      matrix = readMatrixAuthorization(saved)
+      break
+    }
+    default: {
+      break
+    }
+  }
   const limits = matrix ? matrixLimits(options) : readLimits(options)
   const contract = restoreContract(saved, context, limits)
   const caps =
@@ -439,8 +459,12 @@ export function openBudget(input: {
     )
       throw new Error("Missing ledger checkpoint for followup")
     ledger.enableCheckpoint()
-    restoreSafetyStop(budgetDirectory, ledger)
-    restoreSafetyStop(directory, ledger)
+    const e2e =
+      options.authorizationFile
+      && record(JSON.parse(readFileSync(options.authorizationFile, "utf8")))
+        .version === 4
+    restoreSafetyStop(budgetDirectory, ledger, Boolean(e2e))
+    restoreSafetyStop(directory, ledger, Boolean(e2e))
     const clock = new LiveTime(budgetDirectory, previous)
     const context: BudgetContext = { ledger, clock }
     if (options.authorizationFile && !shared)
@@ -484,13 +508,25 @@ export function openBudget(input: {
   }
 }
 
-function restoreSafetyStop(directory: string, ledger: BudgetLedger) {
+function restoreSafetyStop(
+  directory: string,
+  ledger: BudgetLedger,
+  e2e = false,
+) {
   const filename = path.join(directory, "blocked.jsonl")
   if (!existsSync(filename)) return
   for (const line of readFileSync(filename, "utf8")
     .split(/\r?\n/u)
     .filter(Boolean)) {
     const reason = record(JSON.parse(line)).reason
+    if (
+      e2e
+      && [
+        "Additional scenario attempt limit reached",
+        "Per-request token limit exceeded",
+      ].includes(String(reason))
+    )
+      continue
     if (
       typeof reason === "string"
       && !ledger.hasHistoricalStop(reason)

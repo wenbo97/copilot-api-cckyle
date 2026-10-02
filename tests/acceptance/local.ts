@@ -7,6 +7,7 @@ import { CLIENTS } from "./lib/local-clients"
 import { FOLLOWUPS } from "./lib/local-followups"
 import { MATRIX, assertMatrixCatalog } from "./lib/local-matrix"
 import { MATRIX_MODELS } from "./lib/local-matrix-authorization"
+import { offline, runCommand } from "./lib/local-offline-gate"
 import {
   checkUsageReconciliation,
   OPERATIONS,
@@ -66,8 +67,11 @@ const includeSoak =
 
 if (args.includes("--help")) {
   console.log(
-    "bun run acceptance:local [--list|--dry-run|--live] [--only id,id] [--max-credits 1000] [--output-dir path]\nCross-version followup: --budget-dir historical-path --max-additional-credits 30 --max-additional-attempts 20 --max-additional-minutes 15\nNew approved round: add --authorization-file path (drafts are rejected; historical stops and cumulative limits remain).\nDefault: offline checks only. Live: wenbo97 bridge, Luna/low, OpenAI-only, 4143, 20-minute soak.\nReuse --output-dir to retain the budget ledger across targeted reruns. No automatic model upgrades or inference retries.",
+    "bun run acceptance:local [--list|--dry-run|--live] [--only id,id] [--max-credits 1000] [--output-dir path]\nCross-version followup: --budget-dir historical-path --max-additional-credits 30 --max-additional-attempts 20 --max-additional-minutes 15\nNew approved round: add --authorization-file path (drafts are rejected; historical stops and cumulative limits remain).\nE2E: --e2e --stage matrix|legacy with the historical --budget-dir, fixed stage limits and one output directory.\nDefault: offline checks only. Live: wenbo97 bridge, Luna/low, OpenAI-only, 4143, 20-minute soak.\nReuse --output-dir to retain the budget ledger across targeted reruns. No automatic model upgrades or inference retries.",
   )
+} else if (args.includes("--e2e")) {
+  const { runE2e } = await import("./lib/local-e2e-runner")
+  await runE2e(args)
 } else if (args.includes("--list") || args.includes("--dry-run")) {
   console.log(
     JSON.stringify(
@@ -120,75 +124,6 @@ if (args.includes("--help")) {
   )
 } else {
   await main()
-}
-
-async function runCommand(
-  directory: string,
-  name: string,
-  command: Array<string>,
-) {
-  console.log(`OFFLINE ${name}`)
-  const child = Bun.spawn(command, {
-    cwd: ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: "ignore",
-  })
-  const timer = setTimeout(() => child.kill(), 180_000)
-  try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ])
-    writeFileSync(path.join(directory, `${name}.log`), stdout + stderr, "utf8")
-    return { name, exitCode, pass: exitCode === 0 }
-  } finally {
-    clearTimeout(timer)
-    if (child.exitCode === null) child.kill()
-  }
-}
-
-async function offline(directory: string) {
-  const guard = path.join(import.meta.dir, "lib/local-network-deny.ts")
-  const commands: Array<[string, Array<string>]> = [
-    [
-      "tests",
-      [process.execPath, "test", "--timeout", "30000", "--preload", guard],
-    ],
-    ["typecheck", [process.execPath, "run", "typecheck"]],
-    ["build", [process.execPath, "run", "build"]],
-    [
-      "offline-operations",
-      [
-        process.execPath,
-        "--no-env-file",
-        path.join(import.meta.dir, "lib/local-offline.ts"),
-        path.join(directory, "offline-operations.json"),
-      ],
-    ],
-    [
-      "start-help",
-      [
-        process.execPath,
-        "--preload",
-        guard,
-        "./src/main.ts",
-        "start",
-        "--help",
-      ],
-    ],
-    ["summary-help", [process.execPath, "run", "usage:summary", "--help"]],
-  ]
-  const outcomes = []
-  for (const [name, command] of commands)
-    outcomes.push(await runCommand(directory, name, command))
-  writeFileSync(
-    path.join(directory, "offline.json"),
-    JSON.stringify(outcomes, null, 2),
-    "utf8",
-  )
-  return outcomes
 }
 
 async function main() {

@@ -27,6 +27,69 @@ owns a fresh proxy on 4143. Ports 4141/4142 and the user's Bridge are untouched.
 The full live run includes a 20-minute observation window with 20 short requests.
 Use `--only` to select cases; fork/resume also selects its seed case.
 
+## Eight-model E2E round
+
+These dated live commands are incident-specific continuations, not a general
+authorization to generate requests. They require the original private ledger,
+the account confirmation recorded for that incident, and, for `legacy`, its
+private historical fixtures. The source snapshot contains the prior approval
+reference; another account or incident needs its own reviewed authorization.
+Those private artifacts are intentionally excluded from source control. A clean
+checkout can run the offline suite and `--dry-run` without them.
+
+The `--e2e` path uses a separate, cumulative version-4 authorization. It runs the
+current dirty source through an owned proxy on port 4142, with isolated Claude
+Code and Codex homes. It preserves the historical budget directory and its
+prior 129 upstream reservations. `--dry-run` lists the exact planned cases and
+prices without starting the proxy or sending generation requests.
+
+```powershell
+bun run acceptance:local --e2e --stage matrix --dry-run
+bun run acceptance:local --e2e --stage matrix --live `
+  --budget-dir tests/_runlog/local-acceptance-20260929 `
+  --output-dir tests/_runlog/e2e-matrix-20260930 `
+  --max-additional-credits 1000 --max-additional-attempts 176 --max-additional-minutes 90
+
+bun run acceptance:local --e2e --stage legacy --dry-run
+bun run acceptance:local --e2e --stage legacy --live `
+  --budget-dir tests/_runlog/local-acceptance-20260929 `
+  --output-dir tests/_runlog/e2e-legacy-20260930 `
+  --max-additional-credits 8000 --max-additional-attempts 2 --max-additional-minutes 10
+```
+
+The offline gate runs before a new authorization is written. Keep the original
+output directory and authorization file for a continuation; changing directory
+or source cannot reset attempts. A case failure continues to the next independent
+case. Budget, account, source, checkpoint, and service failures stop the round.
+
+The matrix covers the eight exact model IDs advertised by the 4141 catalog on
+2026-09-30. Every model gets native Responses and Messages bridge JSON/SSE,
+parallel tool replay, two independent Claude Read turns, Codex's actual read-only
+shell turn, seed/fork/resume across an owned proxy restart, cancellation with a
+next-request check, and a credential refresh check. Each model has 22 reserved
+attempt slots. `gpt-5.6-sol-fast` remains `BLOCKED` until a model-specific
+Copilot price is verified. The existing `gpt-5.6-sol` price is not substituted.
+
+The legacy stage requires Astra's matrix JSON, SSE, and history cases
+to pass under the same source fingerprint. It clones the original incident's
+source-session lineage into an isolated Codex home and checks the full captured
+historical prefix, 137 foreign reasoning ciphertexts, and 149 tool-call/result
+pairs through an offline capture before paid admission. The two calls then
+validate fork and independent resume after restarting only the test proxy. The
+capture of 563 items included four extra diagnostic items beyond the original
+559-item history; a new fork may regenerate its first two tool-metadata items.
+The preflight records the exact current item count and rejects changed inherited
+content, tool pairs, or foreign-ciphertext coverage. It never writes the private
+history to a report.
+
+`summary.json` and `REPORT.md` include per-model pass counts, attempts, usage
+coverage, known input/output/cache tokens, and source fingerprint. Historical
+reports retain the defects observed for their original source snapshot; current
+reports do not advertise the repaired HTTP error-forwarding defect as active.
+Unknown usage is not zero. Credit
+reservations are conservative estimates rather than account deductions. The
+round is incomplete if any required model or case is failed, blocked, or skipped.
+
 `codex-tool` records whether the machine permits a read-only shell command.
 `codex-mcp-tool` separately verifies a pure local MCP tool that returns synthetic
 data without executing commands or accessing files. A successful MCP case does

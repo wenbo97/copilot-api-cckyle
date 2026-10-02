@@ -11,7 +11,7 @@ import path from "node:path"
 import type { Scenario } from "./local-scenarios"
 
 import { stringValue } from "./local-budget"
-import { record, type Json } from "./local-budget"
+import { record, type Json, type Phase } from "./local-budget"
 import {
   claudeIsolationArgs,
   codexSandboxArgs,
@@ -29,7 +29,7 @@ import {
   MODEL,
 } from "./local-runtime"
 
-interface Session {
+export interface Session {
   directory: string
   codexHome: string
   claudeHome: string
@@ -85,6 +85,7 @@ async function capture(
     env: Record<string, string | undefined>
     guardReason?: () => string | undefined
     evidence?: (events: Array<Json>, exitCode: number | null) => void
+    timeoutMs?: number
   },
 ) {
   const { cwd, env } = options
@@ -112,7 +113,7 @@ async function capture(
   const timeout = setTimeout(() => {
     timedOut = true
     stop()
-  }, 125000)
+  }, options.timeoutMs ?? 125000)
   const guardPoll = setInterval(() => {
     guardFailure = options.guardReason?.()
     if (guardFailure) stop()
@@ -135,7 +136,9 @@ async function capture(
     assert(!guardFailure, `Budget guard: ${guardFailure ?? "unknown"}`)
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- the deadline callback mutates this while child output is awaited
     if (timedOut)
-      throw new AcceptanceTimeoutError("Client exceeded 125 seconds")
+      throw new AcceptanceTimeoutError(
+        `Client exceeded ${(options.timeoutMs ?? 125000) / 1000} seconds`,
+      )
     const error = events.find((event) => event.type === "error")
     assert(
       exitCode === 0,
@@ -149,7 +152,7 @@ async function capture(
   }
 }
 
-async function codex(
+export async function codex(
   runtime: AcceptanceRuntime,
   id: string,
   options: {
@@ -158,13 +161,20 @@ async function codex(
     thread?: string
     mcpUrl?: string
     model?: string
+    fixture?: Session
+    phase?: Phase
+    timeoutMs?: number
+    noTools?: boolean
   },
 ) {
   const { prompt, mode, thread } = options
   const startedAt = Date.now()
   const model = options.model ?? MODEL
-  const data = session(runtime, model)
-  await runtime.management("configure", { caseId: id, phase: "clients" })
+  const data = options.fixture ?? session(runtime, model)
+  await runtime.management("configure", {
+    caseId: id,
+    phase: options.phase ?? "clients",
+  })
   const args = [
     "-a",
     "never",
@@ -196,6 +206,8 @@ async function codex(
     "-c",
     "model_providers.acceptance.stream_max_retries=0",
   ]
+  if (options.noTools)
+    args.push("--disable", "shell_tool", "--disable", "unified_exec")
   if (options.mcpUrl)
     args.push(
       "-c",
@@ -212,6 +224,7 @@ async function codex(
   args.push(prompt)
   const events = await capture(Bun.which("codex") ?? "codex", args, {
     cwd: data.directory,
+    timeoutMs: options.timeoutMs,
     guardReason: () => {
       if (runtime.halted) return "Acceptance halted"
       const blocked = runtime.blocked.findLast((row) => row.caseId === id)
@@ -229,6 +242,10 @@ async function codex(
     }),
   })
   events.push(...rolloutToolEvents(data.codexHome, startedAt))
+  return parseCodexTurn(events)
+}
+
+export function parseCodexTurn(events: Array<Json>) {
   assert(
     events.some((event) => event.type === "turn.completed"),
     "Codex did not complete the turn",
@@ -236,11 +253,9 @@ async function codex(
   const items = events
     .filter((event) => event.type === "item.completed")
     .map((event) => record(event.item))
-  const text = items
-    .filter((item) => item.type === "agent_message")
-    .map((item) => String(item.text))
-    .join("\n")
-    .trim()
+  const text = stringValue(
+    items.findLast((item) => item.type === "agent_message")?.text,
+  ).trim()
   return {
     text,
     thread: events.find((event) => event.type === "thread.started")?.thread_id,

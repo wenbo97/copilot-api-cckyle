@@ -140,3 +140,59 @@ test("startup diagnostics redact the entire bearer credential", () => {
   expect(diagnostic).not.toContain("example-secret")
   expect(diagnostic).toContain("credential redacted")
 })
+
+test("a completed Responses frame retains protocol success when cleanup aborts transport", async () => {
+  let sourceController: ReadableStreamDefaultController<Uint8Array> | undefined
+  const raw =
+    'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}\n\n'
+  const observations: Array<Observation> = []
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      sourceController = controller
+      controller.enqueue(new TextEncoder().encode(raw))
+    },
+  })
+  const observed = await observeBody(
+    new Response(source, {
+      headers: { "content-type": "text/event-stream" },
+    }),
+    (event) => {
+      observations.push(event)
+      return Promise.resolve()
+    },
+  )
+  const reader = observed.body?.getReader()
+  expect(new TextDecoder().decode((await reader?.read())?.value)).toBe(raw)
+  sourceController?.error(new DOMException("Fixture cleanup", "AbortError"))
+  if (!reader) throw new Error("Expected observed response body")
+  let streamError: unknown
+  try {
+    await reader.read()
+  } catch (error) {
+    streamError = error
+  }
+  expect(streamError).toBeInstanceOf(DOMException)
+  expect(observations[0].outcome).toBe("completed")
+  expect(observations[0].protocolOutcome).toBe("completed")
+  expect(observations[0].transportOutcome).toBe("transport_error")
+  expect(observations[0].usage?.input_tokens).toBe(3)
+})
+
+test("EOF before a native Responses terminal is incomplete", async () => {
+  const observations: Array<Observation> = []
+  const observed = await observeBody(
+    new Response(
+      'data: {"type":"response.created","response":{"status":"in_progress"}}\n\n',
+      {
+        headers: { "content-type": "text/event-stream" },
+      },
+    ),
+    (event) => {
+      observations.push(event)
+      return Promise.resolve()
+    },
+  )
+  await observed.text()
+  expect(observations[0].outcome).toBe("incomplete")
+  expect(observations[0].transportOutcome).toBe("closed")
+})

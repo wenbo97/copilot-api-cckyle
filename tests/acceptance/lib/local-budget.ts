@@ -8,6 +8,12 @@ import {
   renameSync,
 } from "node:fs"
 
+import { readCacheAuthorization } from "./local-cache-authorization"
+import {
+  e2eRate,
+  readE2eAuthorization,
+  type E2eAuthorization,
+} from "./local-e2e-authorization"
 import {
   assertMatrixScope,
   MATRIX_RATES,
@@ -67,6 +73,8 @@ export interface Grant extends Reservation {
   id: string
   at: string
   reservedCredits: number
+  roundId?: string
+  pricingTier?: "default" | "long"
 }
 
 export interface Observation {
@@ -75,6 +83,8 @@ export interface Observation {
   durationMs?: number
   upstreamSignalAborted?: boolean
   usage: Json | null
+  protocolOutcome?: string
+  transportOutcome?: string
 }
 
 interface Observed extends Observation {
@@ -85,6 +95,7 @@ interface Observed extends Observation {
 
 export class BudgetLedger {
   private matrix?: MatrixAuthorization
+  private e2e?: E2eAuthorization
   stopReason?: string
   private readonly stops: Array<string> = []
   private readonly authorizations = new Map<
@@ -177,6 +188,11 @@ export class BudgetLedger {
       serialized,
       stops: this.stops.length,
     })
+    this.e2e =
+      authorization.version === 4 ?
+        readE2eAuthorization(authorization)
+      : undefined
+    if (this.e2e) this.assertE2eBaseline(this.e2e)
     this.stopReason ??=
       "Explicit authorization file required for round continuation"
   }
@@ -201,10 +217,30 @@ export class BudgetLedger {
     }
     if (row.kind !== "reserve")
       throw new Error("Unrecognized ledger entry; refusing to reset budget")
-    const grant = row as unknown as Grant
+    this.restoreGrant(row as unknown as Grant)
+  }
+
+  private ratesFor(
+    request: Pick<Reservation, "model" | "inputTokens">,
+  ): { input: number; output: number; tier?: "default" | "long" } | undefined {
+    if (this.e2e) return e2eRate(this.e2e, request.model, request.inputTokens)
+    return Object.hasOwn(RATES, request.model) ?
+        RATES[request.model]
+      : undefined
+  }
+
+  private restoreGrant(grant: Grant) {
     this.validateRequest(grant)
-    const rates =
-      Object.hasOwn(RATES, grant.model) ? RATES[grant.model] : undefined
+    const rates = this.ratesFor(grant)
+    if (this.e2e) {
+      assertMatrixScope(this.e2e, grant)
+      if (
+        grant.roundId !== this.e2e.roundId
+        || grant.pricingTier !== rates?.tier
+      )
+        throw new Error("Corrupt E2E reservation binding")
+    } else if (grant.roundId !== undefined)
+      throw new Error("Unexpected E2E reservation")
     if (
       !rates
       || typeof grant.id !== "string"
@@ -235,7 +271,11 @@ export class BudgetLedger {
     for (const count of [request.inputTokens, request.outputTokens])
       if (!Number.isSafeInteger(count) || count <= 0)
         throw new Error("Invalid token count")
-    if (request.inputTokens > 65536 || request.outputTokens > 4096)
+    const cap = this.e2e?.cases[request.caseId]
+    if (
+      request.inputTokens > (cap?.inputTokens ?? 65536)
+      || request.outputTokens > (cap?.outputTokens ?? 4096)
+    )
       throw new Error("Per-request token limit exceeded")
     return phase
   }
@@ -265,8 +305,11 @@ export class BudgetLedger {
 
   activateAuthorization(roundId: string, serialized: string) {
     const saved = record(JSON.parse(serialized))
-    const matrix =
-      saved.version === 2 ? readMatrixAuthorization(saved) : undefined
+    let matrix: MatrixAuthorization | undefined
+    const e2e = saved.version === 4 ? readE2eAuthorization(saved) : undefined
+    if (e2e) matrix = e2e
+    else if (saved.version === 3) matrix = readCacheAuthorization(saved)
+    else if (saved.version === 2) matrix = readMatrixAuthorization(saved)
     if (this.checkpointFailed) throw new Error("Ledger checkpoint failed")
     const existing = this.authorizations.get(roundId)
     if (existing) {
@@ -291,6 +334,7 @@ export class BudgetLedger {
         ) > 0.000001
       )
         throw new Error("Authorization baseline must match current ledger")
+      if (e2e) this.assertE2eBaseline(e2e)
       appendFileSync(
         this.file,
         `${JSON.stringify({ kind: "authorization", serialized })}\n`,
@@ -301,6 +345,29 @@ export class BudgetLedger {
     }
     this.stopReason = undefined
     this.matrix = matrix
+    this.e2e = e2e
+  }
+
+  private assertE2eBaseline(authorization: E2eAuthorization) {
+    if (
+      authorization.baseAttempts !== this.grants.length
+      || Math.abs(authorization.baseCredits - this.summary().reservedCredits)
+        > 0.000001
+    )
+      throw new Error("E2E authorization baseline mismatch")
+    for (const [phase, baseline] of Object.entries(
+      authorization.phaseBaselines,
+    )) {
+      const grants = this.grants.filter((grant) => grant.phase === phase)
+      if (
+        grants.length !== baseline.attempts
+        || Math.abs(
+          grants.reduce((sum, grant) => sum + grant.reservedCredits, 0)
+            - baseline.credits,
+        ) > 0.000001
+      )
+        throw new Error("E2E phase baseline mismatch")
+    }
   }
 
   private admissionPhase(request: Reservation) {
@@ -322,16 +389,31 @@ export class BudgetLedger {
     return phase
   }
 
+  private assertE2eCaseCap(request: Reservation) {
+    if (!this.e2e) return
+    const cap = assertMatrixScope(this.e2e, request)
+    const attempts = this.grants
+      .slice(this.e2e.baseAttempts)
+      .filter((grant) => grant.caseId === request.caseId).length
+    if (attempts >= cap.attempts)
+      throw new Error("Additional scenario attempt limit reached")
+  }
+
+  private assertReservationPrice(credits: number) {
+    if (!Number.isFinite(credits) || credits <= 0)
+      throw new Error("Invalid credit reservation")
+  }
+
   reserve(request: Reservation): Grant {
     if (this.stopReason)
       throw new Error(`Persisted acceptance stop: ${this.stopReason}`)
     if (this.checkpointFailed) throw new Error("Ledger checkpoint failed")
     if (typeof request.model !== "string")
       throw new Error("Model must be an allowlisted string")
-    const rates =
-      Object.hasOwn(RATES, request.model) ? RATES[request.model] : undefined
+    const rates = this.ratesFor(request)
     if (!rates) throw new Error("Model is not in the priced OpenAI allowlist")
     const phase = this.admissionPhase(request)
+    this.assertE2eCaseCap(request)
     const credits =
       Math.ceil(
         ((request.inputTokens * rates.input
@@ -339,8 +421,7 @@ export class BudgetLedger {
           / 10000)
           * 1e6,
       ) / 1e6
-    if (!Number.isFinite(credits) || credits <= 0)
-      throw new Error("Invalid credit reservation")
+    this.assertReservationPrice(credits)
     const phaseGrants = this.grants.filter(
       (grant) => grant.phase === request.phase,
     )
@@ -353,7 +434,8 @@ export class BudgetLedger {
     const sum = (rows: Array<Grant>) =>
       rows.reduce((total, grant) => total + grant.reservedCredits, 0)
     if (
-      sum(this.grants) + credits > this.maxCredits * 0.9
+      sum(this.grants) + credits
+        > (this.e2e?.cumulative.admissionCredits ?? this.maxCredits * 0.9)
       || sum(phaseGrants) + credits > phase.credits
     )
       throw new Error("Credit reservation limit exceeded")
@@ -364,6 +446,12 @@ export class BudgetLedger {
       id: randomUUID(),
       at: new Date().toISOString(),
       reservedCredits: credits,
+      ...(this.e2e ?
+        {
+          roundId: this.e2e.roundId,
+          pricingTier: rates.tier,
+        }
+      : {}),
     }
     // Synchronous append and accounting keep concurrent reservations atomic.
     appendFileSync(this.file, `${JSON.stringify(grant)}\n`, "utf8")
@@ -388,8 +476,9 @@ export class BudgetLedger {
 
   summary() {
     return {
-      maxCredits: this.maxCredits,
-      admissionLimitCredits: this.maxCredits * 0.9,
+      maxCredits: this.e2e?.cumulative.maxCredits ?? this.maxCredits,
+      admissionLimitCredits:
+        this.e2e?.cumulative.admissionCredits ?? this.maxCredits * 0.9,
       reservedCredits: this.grants.reduce(
         (total, grant) => total + grant.reservedCredits,
         0,
@@ -432,7 +521,11 @@ function outputLimitKey(endpoint: string, body: Json): string {
   return "max_completion_tokens"
 }
 
-export function prepareGeneration(endpoint: string, source: Json) {
+export function prepareGeneration(
+  endpoint: string,
+  source: Json,
+  limits = { inputTokens: 65536, outputTokens: 4096 },
+) {
   if (!["/chat/completions", "/responses"].includes(endpoint))
     throw new Error("Unexpected generation endpoint")
   const body = { ...source }
@@ -451,16 +544,36 @@ export function prepareGeneration(endpoint: string, source: Json) {
     && (!Number.isSafeInteger(requested) || Number(requested) <= 0)
   )
     throw new Error("Invalid output token limit")
-  const outputTokens = Math.min(Number(requested ?? 2048), 4096)
+  validateGenerationLimits(limits)
+  const outputTokens = Math.min(Number(requested ?? 2048), limits.outputTokens)
   const limitApplied =
     requested === undefined || Number(requested) > outputTokens
   body[key] = outputTokens
   const serialized = JSON.stringify(body)
   const media = /"type":"input_(?:image|file)"|"image_url"/u.test(serialized)
   const inputTokens = media ? 65536 : encode(serialized).length * 2 + 1024
-  if (inputTokens > 65536)
-    throw new Error("Estimated input exceeds 64K acceptance limit")
+  if (inputTokens > limits.inputTokens)
+    throw new Error(
+      limits.inputTokens === 65536 ?
+        "Estimated input exceeds 64K acceptance limit"
+      : "Estimated input exceeds authorized history limit",
+    )
   return { body, serialized, inputTokens, outputTokens, effort, limitApplied }
+}
+
+function validateGenerationLimits(limits: {
+  inputTokens: number
+  outputTokens: number
+}) {
+  if (
+    !Number.isSafeInteger(limits.inputTokens)
+    || limits.inputTokens <= 0
+    || limits.inputTokens > 1000000
+    || !Number.isSafeInteger(limits.outputTokens)
+    || limits.outputTokens <= 0
+    || limits.outputTokens > 4096
+  )
+    throw new Error("Invalid explicit request token caps")
 }
 
 export function stringValue(value: unknown): string {

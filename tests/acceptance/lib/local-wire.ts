@@ -51,22 +51,30 @@ export async function observeBody(
     return response
   }
   const started = performance.now()
-  const decoder = new TextDecoder()
   const streaming = response.headers
     .get("content-type")
     ?.includes("text/event-stream")
-  let pending = ""
   let usage: Json | null = null
   let outcome = response.ok ? "completed" : "http_error"
+  let protocolOutcome: string | undefined
+  let nativeStream = false
   let finished = false
-  let cancelled = false
   const complete = async (state: string) => {
     if (finished) return
     finished = true
     await finish({
-      outcome: state,
+      outcome:
+        protocolOutcome
+        ?? ((
+          state !== "transport_error" && state !== "cancelled" && nativeStream
+        ) ?
+          "incomplete"
+        : state),
       status: response.status,
       usage,
+      protocolOutcome,
+      transportOutcome:
+        state === "transport_error" || state === "cancelled" ? state : "closed",
       durationMs: Math.round(performance.now() - started),
     })
   }
@@ -78,12 +86,44 @@ export async function observeBody(
         usage = usageOf(value) ?? usage
         const status = record(value.response).status
         if (typeof status === "string") outcome = status
+        if (streaming) {
+          if (String(value.type).startsWith("response.")) nativeStream = true
+          protocolOutcome = wireTerminal(value) ?? protocolOutcome
+        } else if (
+          ["completed", "failed", "incomplete"].includes(String(status))
+        )
+          protocolOutcome = String(status)
       }
     } catch {
       // Protocol validation remains the responsibility of the real handler.
     }
   }
-  const stream = new ReadableStream<Uint8Array>({
+  const stream = observedBodyStream({
+    reader,
+    streaming,
+    consume,
+    complete,
+    outcome: () => outcome,
+  })
+  return new Response(stream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}
+
+function observedBodyStream(input: {
+  reader: ReadableStreamDefaultReader<Uint8Array>
+  streaming?: boolean
+  consume: (data: string) => void
+  complete: (state: string) => Promise<void>
+  outcome: () => string
+}): ReadableStream<Uint8Array> {
+  const { reader, streaming, consume, complete, outcome } = input
+  const decoder = new TextDecoder()
+  let pending = ""
+  let cancelled = false
+  return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const next = await reader.read()
@@ -91,7 +131,7 @@ export async function observeBody(
         if (next.done) {
           pending += decoder.decode()
           consume(pending)
-          await complete(outcome)
+          await complete(outcome())
           controller.close()
           return
         }
@@ -120,11 +160,24 @@ export async function observeBody(
       }
     },
   })
-  return new Response(stream, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  })
+}
+
+function wireTerminal(value: Json): string | undefined {
+  const type = value.type
+  const status = record(value.response).status
+  if (type === "response.completed" && status === "completed")
+    return "completed"
+  if (type === "response.failed" || type === "error") return "failed"
+  if (type === "response.incomplete") return "incomplete"
+  if (type === "message_stop") return "completed"
+  if (typeof value.status === "number" && value.status >= 400) return "failed"
+  if (
+    Array.isArray(value.choices)
+    && value.choices.some(
+      (choice) => typeof record(choice).finish_reason === "string",
+    )
+  )
+    return "completed"
 }
 
 export function validateResponseEvents(events: Array<Json>): Json {

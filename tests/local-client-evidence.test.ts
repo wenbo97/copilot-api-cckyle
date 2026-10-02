@@ -10,8 +10,12 @@ import {
   projectClientEvents,
   projectWireEvent,
   readArguments,
+  textEvidence,
 } from "./acceptance/lib/local-client-evidence"
-import { prepareClientFixtures } from "./acceptance/lib/local-clients"
+import {
+  parseCodexTurn,
+  prepareClientFixtures,
+} from "./acceptance/lib/local-clients"
 import { observeBody } from "./acceptance/lib/local-wire"
 
 test("client fixtures isolate model homes and explicitly cap Claude output", () => {
@@ -239,4 +243,60 @@ test("wire capture observes usage without changing bytes or missing-zero meaning
   expect(events).toHaveLength(2)
   expect(events[0]?.message).toEqual({ usage: { input_tokens: 0 } })
   expect(events[1]?.usage).toBeUndefined()
+})
+
+test("a nested synthetic Codex tool output retains the real command exit code", () => {
+  const evidence = textEvidence([
+    [
+      { type: "input_text", text: "Script completed\nOutput:\n" },
+      {
+        type: "input_text",
+        text: JSON.stringify({ exit_code: 0, output: "LOCAL_TOOL_42\n" }),
+      },
+    ],
+  ])
+  expect(evidence.markerPresent).toBe(true)
+  expect(evidence.exitCodeZero).toBe(true)
+  expect(evidence.blocked).toBe(false)
+})
+
+test("Codex final text excludes intermediate assistant progress messages", () => {
+  const events: Array<Json> = [
+    { type: "thread.started", thread_id: "synthetic-thread" },
+    {
+      type: "item.completed",
+      item: {
+        type: "agent_message",
+        text: "Reading the synthetic marker now.",
+      },
+    },
+    {
+      type: "item.completed",
+      item: { type: "command_execution", aggregated_output: "LOCAL_TOOL_42" },
+    },
+    {
+      type: "item.completed",
+      item: { type: "agent_message", text: "LOCAL_TOOL_42\n" },
+    },
+    { type: "turn.completed" },
+  ]
+  const result = parseCodexTurn(events)
+  expect(result.text).toBe("LOCAL_TOOL_42")
+  expect(result.thread).toBe("synthetic-thread")
+  expect(result.items).toHaveLength(3)
+  expect(result.events).toBe(events)
+})
+
+test("a tool result is not substituted for a missing or failed Codex final answer", () => {
+  const events: Array<Json> = [
+    {
+      type: "item.completed",
+      item: { type: "command_execution", aggregated_output: "LOCAL_TOOL_42" },
+    },
+    { type: "turn.completed" },
+  ]
+  expect(parseCodexTurn(events).text).toBe("")
+  expect(() => parseCodexTurn([{ type: "turn.failed" }])).toThrow(
+    "Codex did not complete the turn",
+  )
 })

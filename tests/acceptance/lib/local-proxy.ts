@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { createHash, randomUUID } from "node:crypto"
-import { writeFileSync } from "node:fs"
+import { readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
 import { PATHS } from "~/lib/paths"
@@ -16,10 +16,18 @@ import {
   type Json,
 } from "./local-budget"
 import { projectWireEvent } from "./local-client-evidence"
+import { readE2eAuthorization } from "./local-e2e-authorization"
 import { executionManifest, identitySha256 } from "./local-identity"
 import { observeBody } from "./local-wire"
 
 const loadedIdentitySha256 = identitySha256(executionManifest())
+const e2eAuthorizationFile = process.env.ACCEPTANCE_E2E_AUTHORIZATION
+const e2eAuthorization =
+  e2eAuthorizationFile ?
+    readE2eAuthorization(
+      record(JSON.parse(readFileSync(e2eAuthorizationFile, "utf8"))),
+    )
+  : undefined
 
 const controlUrl = process.env.ACCEPTANCE_CONTROL_URL
 const secret = process.env.ACCEPTANCE_SECRET
@@ -123,11 +131,27 @@ function inputSummary(input: unknown): Json {
   }
 }
 
+function requestTarget(input: string | URL | Request, init?: RequestInit) {
+  return {
+    url: new URL(input instanceof Request ? input.url : String(input)),
+    method: init?.method ?? (input instanceof Request ? input.method : "GET"),
+  }
+}
+
+function prepareObservedRequest(
+  pathname: string,
+  payload: Json,
+  caseId: string,
+) {
+  const cap = e2eAuthorization?.cases[caseId]
+  if (e2eAuthorization && !cap)
+    throw new Error("Unassigned E2E request blocked")
+  return prepareGeneration(pathname, payload, cap)
+}
+
 globalThis.fetch = Object.assign(
   async (input: string | URL | Request, init?: RequestInit) => {
-    const url = new URL(input instanceof Request ? input.url : String(input))
-    const method =
-      init?.method ?? (input instanceof Request ? input.method : "GET")
+    const { url, method } = requestTarget(input, init)
     if (isMetadataRequest(url, method))
       return originalFetch(input, { ...init, redirect: "error" })
     if (!isUpstream(url) || method !== "POST")
@@ -139,8 +163,12 @@ globalThis.fetch = Object.assign(
         throw new Error("Expected JSON generation body")
       const payload = record(JSON.parse(init.body))
       egress = egressSummary(payload)
-      const prepared = prepareGeneration(url.pathname, payload)
       const owner = context.getStore() ?? defaultContext
+      const prepared = prepareObservedRequest(
+        url.pathname,
+        payload,
+        owner.caseId,
+      )
       const grant = await control("reserve", {
         ...owner,
         egress,
@@ -362,6 +390,9 @@ function observeUpstream(
 function isClaudeToolCase(id: string): boolean {
   return (
     id === "claude-tool"
+    || /^e2e-gpt-[\d.]+-(?:luna|terra|sol|astra)(?:-fast)?-claude-[ab]$/u.test(
+      id,
+    )
     || /^matrix-gpt-[\d.]+-(?:luna|terra|sol|astra)-claude-tool$/u.test(id)
   )
 }
@@ -384,14 +415,15 @@ const { runServer } = await import("~/start")
 await runServer({
   port: Number(process.env.ACCEPTANCE_PORT ?? "4143"),
   accountType: process.env.ACCEPTANCE_ACCOUNT_TYPE ?? "individual",
-  verbose: false,
+  verbose: process.env.ACCEPTANCE_VERBOSE === "1",
   manual: false,
   rateLimitWait: false,
   showToken: false,
   githubToken: "acceptance-bridge-only",
   claudeCode: false,
   proxyEnv: false,
-  trace: false,
+  trace: process.env.ACCEPTANCE_TRACE === "1",
+  traceFolder: path.join(evidenceDirectory, "traces"),
 })
 
 // A lost parent must not leave a credential-refreshing child behind.

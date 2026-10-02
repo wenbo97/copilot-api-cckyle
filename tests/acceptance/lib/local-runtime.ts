@@ -19,12 +19,19 @@ import {
   type Reservation,
 } from "./local-budget"
 import { openBudget, type ContinuationOptions } from "./local-continuation"
+import {
+  readE2eAuthorization,
+  type E2eAuthorization,
+} from "./local-e2e-authorization"
 import { executionManifest, identitySha256 } from "./local-identity"
 import { LiveTime } from "./local-live-time"
 import { parseEvents, validateResponseEvents } from "./local-wire"
 
 export const ROOT = path.resolve(import.meta.dir, "../../..")
-export const ACCEPTANCE_PORT = Number(process.env.ACCEPTANCE_PORT ?? "4143")
+export const ACCEPTANCE_PORT = Number(
+  process.env.ACCEPTANCE_PORT
+    ?? (process.argv.includes("--e2e") ? "4142" : "4143"),
+)
 if (
   !Number.isInteger(ACCEPTANCE_PORT)
   || ACCEPTANCE_PORT < 1024
@@ -83,7 +90,32 @@ export function childEnvironment(extra: Record<string, string> = {}) {
   return { ...env, ...extra }
 }
 
+function authorizationSnapshot(
+  options: ContinuationOptions,
+  sourceSha256: string,
+): {
+  e2e?: E2eAuthorization
+  authorizationCheckpoint?: { file: string; text: string }
+  proxyEnvironment: Record<string, string>
+} {
+  if (!options.authorizationFile) return { proxyEnvironment: {} }
+  const text = readFileSync(options.authorizationFile, "utf8")
+  const saved = record(JSON.parse(text))
+  const e2e = saved.version === 4 ? readE2eAuthorization(saved) : undefined
+  if (e2e)
+    assert(e2e.executionSha256 === sourceSha256, "E2E source identity mismatch")
+  return {
+    e2e,
+    authorizationCheckpoint: { file: options.authorizationFile, text },
+    proxyEnvironment:
+      e2e ? { ACCEPTANCE_E2E_AUTHORIZATION: options.authorizationFile } : {},
+  }
+}
+
 export class AcceptanceRuntime {
+  readonly e2e?: E2eAuthorization
+  readonly proxyEnvironment: Record<string, string> = {}
+  private readonly authorizationCheckpoint?: { file: string; text: string }
   readonly budgetSession: ReturnType<typeof openBudget>
   readonly directory: string
   readonly ledger: BudgetLedger
@@ -113,6 +145,13 @@ export class AcceptanceRuntime {
     options: ContinuationOptions = {},
   ) {
     this.directory = directory
+    const snapshot = authorizationSnapshot(
+      options,
+      identitySha256(this.execution),
+    )
+    this.authorizationCheckpoint = snapshot.authorizationCheckpoint
+    this.e2e = snapshot.e2e
+    this.proxyEnvironment = snapshot.proxyEnvironment
     mkdirSync(directory, { recursive: true })
     const previousManifest = path.join(directory, "source-manifest.json")
     const previousExecution = path.join(directory, "execution-manifest.json")
@@ -153,8 +192,7 @@ export class AcceptanceRuntime {
     this.clock = this.budgetSession.clock
     if (this.budgetSession.expired() || this.ledger.stopReason)
       this.halted = true
-    for (const [id, observation] of this.ledger.observations)
-      this.applyStopCondition(id, observation)
+    this.applyPersistedObservations()
     let controller: ReturnType<typeof Bun.serve> | undefined
     try {
       writeFileSync(
@@ -204,6 +242,14 @@ export class AcceptanceRuntime {
     })
   }
 
+  private applyPersistedObservations() {
+    for (const [id, observation] of this.ledger.observations) {
+      const index = this.ledger.grants.findIndex((grant) => grant.id === id)
+      if (!this.e2e || index >= this.e2e.baseAttempts)
+        this.applyStopCondition(id, observation)
+    }
+  }
+
   private async handleControl(request: Request) {
     if (request.headers.get("x-acceptance-secret") !== this.secret)
       return new Response("Forbidden", { status: 403 })
@@ -240,12 +286,14 @@ export class AcceptanceRuntime {
         identitySha256(executionManifest()) === identitySha256(this.execution),
         "Acceptance source changed during acceptance",
       )
+      this.assertAuthorizationFilesUnchanged()
       return Response.json(this.ledger.reserve(body as unknown as Reservation))
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Controller failure"
       if (
-        /limit (?:exceeded|reached)|deadline|source changed|checkpoint/iu.test(
+        (!this.e2e || message !== "Additional scenario attempt limit reached")
+        && /limit (?:exceeded|reached)|deadline|source changed|checkpoint/iu.test(
           message,
         )
       ) {
@@ -256,13 +304,34 @@ export class AcceptanceRuntime {
     }
   }
 
+  private assertAuthorizationFilesUnchanged() {
+    if (this.authorizationCheckpoint)
+      assert(
+        readFileSync(this.authorizationCheckpoint.file, "utf8")
+          === this.authorizationCheckpoint.text,
+        "Authorization source changed during acceptance",
+      )
+    if (this.e2e?.legacyManifestSha256) {
+      const manifest = this.proxyEnvironment.COPILOT_FOREIGN_REASONING_MANIFEST
+      assert(
+        manifest
+          && createHash("sha256").update(readFileSync(manifest)).digest("hex")
+            === this.e2e.legacyManifestSha256,
+        "Historical manifest source changed during acceptance",
+      )
+    }
+  }
+
   recordObservation(id: string, observation: Observation) {
     this.ledger.observe(id, observation)
     this.applyStopCondition(id, observation)
   }
 
   private applyStopCondition(id: string, observation: Observation) {
-    if ([402, 403, 429].includes(observation.status ?? 0)) this.halted = true
+    if ([402, 403, 429].includes(observation.status ?? 0)) {
+      this.halted = true
+      if (this.e2e) this.ledger.halt("Upstream account or rate-limit stop")
+    }
     const grant = this.ledger.grants.find((entry) => entry.id === id)
     const usage = record(observation.usage)
     if (
@@ -271,8 +340,10 @@ export class AcceptanceRuntime {
         > grant.inputTokens
         || Number(usage.output_tokens ?? usage.completion_tokens ?? 0)
           > grant.outputTokens)
-    )
+    ) {
       this.halted = true
+      if (this.e2e) this.ledger.halt("Observed usage exceeded reservation")
+    }
   }
 
   async authenticate() {
@@ -335,6 +406,7 @@ export class AcceptanceRuntime {
         stdout: "pipe",
         stderr: "pipe",
         env: childEnvironment({
+          ...this.proxyEnvironment,
           ACCEPTANCE_PORT: String(ACCEPTANCE_PORT),
           ACCEPTANCE_CONTROL_URL: `http://127.0.0.1:${this.controller.port}`,
           ACCEPTANCE_SECRET: this.secret,
@@ -374,16 +446,17 @@ export class AcceptanceRuntime {
           this.catalog = data.map((value) => record(value))
           const primary = this.catalog.find((model) => model.id === MODEL)
           assert(
-            primary
-              && Array.isArray(primary.supported_endpoints)
-              && primary.supported_endpoints.includes("/responses"),
+            this.e2e
+              || (primary
+                && Array.isArray(primary.supported_endpoints)
+                && primary.supported_endpoints.includes("/responses")),
             "Luna native Responses unavailable",
           )
           const efforts = record(
-            record(primary.capabilities).supports,
+            record(primary?.capabilities).supports,
           ).reasoning_effort
           assert(
-            Array.isArray(efforts) && efforts.includes("low"),
+            this.e2e || (Array.isArray(efforts) && efforts.includes("low")),
             "Catalog does not advertise Luna low effort",
           )
           return
@@ -521,8 +594,9 @@ export class AcceptanceRuntime {
     } catch (error) {
       detail = error instanceof Error ? error.message : "Unknown failure"
       if (
-        error instanceof AcceptanceTimeoutError
-        || (error instanceof Error && error.name === "TimeoutError")
+        !this.e2e
+        && (error instanceof AcceptanceTimeoutError
+          || (error instanceof Error && error.name === "TimeoutError"))
       ) {
         this.halted = true
         this.ledger.halt("Acceptance scenario timeout")
@@ -534,7 +608,7 @@ export class AcceptanceRuntime {
         ) ?
           "blocked"
         : "fail"
-      if (status === "blocked") {
+      if (status === "blocked" && !this.e2e) {
         this.halted = true
         this.ledger.halt(
           error instanceof AcceptanceBlockedError ?
