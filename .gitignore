@@ -31,3 +31,5 @@ tmps/
 .codegraph/
 CACHE-EVALUATION.md
 CONTEXT.md
+
+.npmrc

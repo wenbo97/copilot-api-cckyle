@@ -6,6 +6,15 @@ import { state } from "~/lib/state"
 import { ensureCopilotToken } from "~/lib/token"
 import { rejectInputConnectionMismatch } from "~/services/copilot/input-connection-error"
 
+import {
+  type CopilotFetchObserver,
+  type FetchAttemptCause,
+  observeRequest,
+} from "./request-observer"
+
+const ERROR_BODY_MAX_BYTES = 16 * 1024
+const ERROR_BODY_TIMEOUT_MS = 1000
+
 /**
  * Make a fetch request to the Copilot API with automatic token refresh on 401.
  * All Copilot API calls should go through this function.
@@ -19,6 +28,7 @@ export async function copilotFetch(
     signal?: AbortSignal
     headerTimeoutMs?: number
     onAttempt?: () => void
+    observer?: CopilotFetchObserver
   } = {},
 ): Promise<Response> {
   options.signal?.throwIfAborted()
@@ -26,12 +36,21 @@ export async function copilotFetch(
   options.signal?.throwIfAborted()
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const makeRequest = () => {
+  const makeRequest = async (cause: FetchAttemptCause) => {
     options.onAttempt?.()
-    return fetchWithHeaderTimeout(path, options)
+    const observer = options.observer
+    if (observer) observeRequest(() => observer.start(cause))
+    try {
+      const result = await fetchWithHeaderTimeout(path, options)
+      if (observer) observeRequest(() => observer.headers(result.status))
+      return result
+    } catch (error) {
+      if (observer) observeRequest(() => observer.failure(error))
+      throw error
+    }
   }
 
-  const response = await makeRequest()
+  const response = await makeRequest("initial")
 
   if (response.status === 401) {
     await rejectInputConnectionMismatch(path, response, options.signal)
@@ -41,24 +60,86 @@ export async function copilotFetch(
     await waitForAuthentication(ensureCopilotToken(true), options.signal)
     options.signal?.throwIfAborted()
     if (!state.copilotToken) {
-      throw new HTTPError("Copilot token refresh failed", response)
+      throw await createHTTPError(
+        "Copilot token refresh failed",
+        response,
+        options.signal,
+      )
     }
-    const retryResponse = await makeRequest()
+    const retryResponse = await makeRequest("auth_refresh")
     if (!retryResponse.ok) {
       await rejectInputConnectionMismatch(path, retryResponse, options.signal)
-      throw new HTTPError(
+      throw await createHTTPError(
         `Failed request to ${path} after token refresh`,
         retryResponse,
+        options.signal,
       )
     }
     return retryResponse
   }
 
   if (!response.ok) {
-    throw new HTTPError(`Failed request to ${path}`, response)
+    throw await createHTTPError(
+      `Failed request to ${path}`,
+      response,
+      options.signal,
+    )
   }
 
   return response
+}
+
+/** Detach a bounded error body before streaming cleanup aborts its fetch. */
+async function createHTTPError(
+  message: string,
+  response: Response,
+  signal?: AbortSignal,
+): Promise<HTTPError> {
+  signal?.throwIfAborted()
+  const reader = response.body?.getReader()
+  if (!reader) return new HTTPError(message, response)
+
+  let errorText = message
+  const deadline = { expired: false }
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined)
+  }
+  const timeout = setTimeout(() => {
+    deadline.expired = true
+    cancel()
+  }, ERROR_BODY_TIMEOUT_MS)
+  signal?.addEventListener("abort", cancel, { once: true })
+  try {
+    const decoder = new TextDecoder()
+    let text = ""
+    let bytes = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) {
+        if (!deadline.expired) errorText = text + decoder.decode()
+        break
+      }
+      bytes += value.byteLength
+      if (bytes > ERROR_BODY_MAX_BYTES) break
+      text += decoder.decode(value, { stream: true })
+    }
+  } catch {
+    // Keep the known upstream status even if its body cannot be read.
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener("abort", cancel)
+    cancel()
+    reader.releaseLock()
+  }
+  signal?.throwIfAborted()
+  return new HTTPError(
+    message,
+    new Response(errorText, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+  )
 }
 
 /** Detach one caller without canceling the process-scoped refresh. */
