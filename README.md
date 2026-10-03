@@ -114,12 +114,13 @@ The proxy resolves a Copilot token in this order:
 
 > Source: [**wenbo97/copilot-token-bridge**](https://github.com/wenbo97/copilot-token-bridge) — the extension is open source; the bundled `.vsix` below is a prebuilt copy.
 
-1. Install the bundled extension: `copilot-token-bridge-0.3.0.vsix`
+1. Install the bundled extension: `copilot-token-bridge-0.3.1.vsix`
    ```sh
-   code --install-extension copilot-token-bridge-0.3.0.vsix
+   code --install-extension copilot-token-bridge-0.3.1.vsix
    ```
-2. Make sure VS Code is signed in to GitHub Copilot and left running.
-3. (Optional) If the extension uses a non-default port, set `VSCODE_PROXY_PORT` in `.env` (default `18774`).
+2. Reload VS Code and make sure it is signed in to GitHub Copilot.
+3. Click the `Copilot Token :18774` status bar item and select **Start server**, or run **Copilot Token Bridge: Start Server** from the command palette. Version 0.3.1 keeps the HTTP server stopped until you start it manually. Leave VS Code running while using the bridge.
+4. (Optional) If the extension uses a non-default port, set `VSCODE_PROXY_PORT` in `.env` (default `18774`).
 
 With the bridge available the proxy can run with **no GitHub token at all** — useful when the device-code flow is blocked.
 
@@ -442,8 +443,9 @@ Arguments are forwarded, for example `bun run dev:cache --port 4142`.
 Full `--trace` captures remain opt-in. The Windows launcher
 `start-copilot-api.cmd` uses this command.
 Set local cache options in the ignored `.env.local` file;
-the tracked `.env` leaves the policy and diagnostics off. The Windows launcher
-explicitly enables `COPILOT_CACHE_DIAGNOSTICS=1`; it does not enable a cache policy.
+the tracked `.env` leaves the prefix policy off and enables passive diagnostics.
+The Windows launcher also explicitly enables `COPILOT_CACHE_DIAGNOSTICS=1`;
+it does not enable a cache policy.
 
 Use `bun run dev:trace` explicitly when you need full request/response captures
 in `traces/` (or `TRACE_OUTPUT_FOLDER`). Those files contain prompt, history,

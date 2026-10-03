@@ -19,18 +19,20 @@ import {
   type Reservation,
 } from "./local-budget"
 import { openBudget, type ContinuationOptions } from "./local-continuation"
-import {
-  readE2eAuthorization,
-  type E2eAuthorization,
-} from "./local-e2e-authorization"
 import { executionManifest, identitySha256 } from "./local-identity"
+import {
+  readObservedAuthorization,
+  type ObservedAuthorization,
+} from "./local-latest-authorization"
 import { LiveTime } from "./local-live-time"
 import { parseEvents, validateResponseEvents } from "./local-wire"
 
 export const ROOT = path.resolve(import.meta.dir, "../../..")
 export const ACCEPTANCE_PORT = Number(
   process.env.ACCEPTANCE_PORT
-    ?? (process.argv.includes("--e2e") ? "4142" : "4143"),
+    ?? (process.argv.includes("--e2e") || process.argv.includes("latest") ?
+      "4142"
+    : "4143"),
 )
 if (
   !Number.isInteger(ACCEPTANCE_PORT)
@@ -94,14 +96,14 @@ function authorizationSnapshot(
   options: ContinuationOptions,
   sourceSha256: string,
 ): {
-  e2e?: E2eAuthorization
+  e2e?: ObservedAuthorization
   authorizationCheckpoint?: { file: string; text: string }
   proxyEnvironment: Record<string, string>
 } {
   if (!options.authorizationFile) return { proxyEnvironment: {} }
   const text = readFileSync(options.authorizationFile, "utf8")
   const saved = record(JSON.parse(text))
-  const e2e = saved.version === 4 ? readE2eAuthorization(saved) : undefined
+  const e2e = readObservedAuthorization(saved)
   if (e2e)
     assert(e2e.executionSha256 === sourceSha256, "E2E source identity mismatch")
   return {
@@ -113,7 +115,7 @@ function authorizationSnapshot(
 }
 
 export class AcceptanceRuntime {
-  readonly e2e?: E2eAuthorization
+  readonly e2e?: ObservedAuthorization
   readonly proxyEnvironment: Record<string, string> = {}
   private readonly authorizationCheckpoint?: { file: string; text: string }
   readonly budgetSession: ReturnType<typeof openBudget>
@@ -375,9 +377,11 @@ export class AcceptanceRuntime {
     if (endpoint.includes("enterprise")) accountType = "enterprise"
     else if (endpoint.includes("business")) accountType = "business"
     this.auth = {
-      account: "wenbo97",
+      account: this.e2e?.stage === "latest" ? "unknown" : "wenbo97",
       identityEvidence:
-        "user-confirmed VS Code login; bridge does not expose username",
+        this.e2e?.stage === "latest" ?
+          "authenticated through the current VS Code Bridge; username unavailable"
+        : "user-confirmed VS Code login; bridge does not expose username",
       sku: token.sku,
       endpoint,
       accountType,
@@ -416,8 +420,7 @@ export class AcceptanceRuntime {
           COPILOT_CACHE_POLICY: "off",
           COPILOT_CACHE_DIAGNOSTICS: "1",
           COPILOT_CACHE_NAMESPACE: "local-acceptance",
-          COPILOT_HEADER_TIMEOUT_MS:
-            this.budgetSession.shared ? "60000" : "30000",
+          COPILOT_HEADER_TIMEOUT_MS: this.headerTimeoutMs(),
           COPILOT_FIRST_EVENT_TIMEOUT_MS: "30000",
           COPILOT_STREAM_IDLE_TIMEOUT_MS: "20000",
           COPILOT_TOTAL_TIMEOUT_MS: "120000",
@@ -479,6 +482,12 @@ export class AcceptanceRuntime {
 
   private isBridgeConfirmed() {
     return this.bridgeConfirmed
+  }
+
+  private headerTimeoutMs() {
+    return this.budgetSession.shared || this.e2e?.stage === "latest" ?
+        "60000"
+      : "30000"
   }
 
   private recordLoadedIdentity(health: Json) {

@@ -1,6 +1,7 @@
+import consola from "consola"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { createHash, randomUUID } from "node:crypto"
-import { readFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
 import { PATHS } from "~/lib/paths"
@@ -16,15 +17,15 @@ import {
   type Json,
 } from "./local-budget"
 import { projectWireEvent } from "./local-client-evidence"
-import { readE2eAuthorization } from "./local-e2e-authorization"
 import { executionManifest, identitySha256 } from "./local-identity"
+import { readObservedAuthorization } from "./local-latest-authorization"
 import { observeBody } from "./local-wire"
 
 const loadedIdentitySha256 = identitySha256(executionManifest())
 const e2eAuthorizationFile = process.env.ACCEPTANCE_E2E_AUTHORIZATION
 const e2eAuthorization =
   e2eAuthorizationFile ?
-    readE2eAuthorization(
+    readObservedAuthorization(
       record(JSON.parse(readFileSync(e2eAuthorizationFile, "utf8"))),
     )
   : undefined
@@ -48,6 +49,21 @@ let defaultContext: { caseId: string; phase: Phase; requestId?: string } = {
   caseId: "unassigned",
   phase: "functional",
 }
+if (e2eAuthorization?.stage === "latest")
+  consola.addReporter({
+    log(event) {
+      const line = event.args.find(
+        (arg: unknown): arg is string =>
+          typeof arg === "string" && arg.startsWith("[cache-diagnostics] "),
+      )
+      if (!line) return
+      const owner = context.getStore()
+      appendFileSync(
+        path.join(evidenceDirectory, "diagnostic-cases.jsonl"),
+        `${JSON.stringify({ caseId: owner?.caseId ?? "uncorrelated", summary: record(JSON.parse(line.slice(line.indexOf("{")))) })}\n`,
+      )
+    },
+  })
 let active = 0
 let blocked = 0
 // Observe the public admission timestamp in the test child, before translation
@@ -390,7 +406,7 @@ function observeUpstream(
 function isClaudeToolCase(id: string): boolean {
   return (
     id === "claude-tool"
-    || /^e2e-gpt-[\d.]+-(?:luna|terra|sol|astra)(?:-fast)?-claude-[ab]$/u.test(
+    || /^(?:e2e|latest)-gpt-[\d.]+-(?:luna|terra|sol|astra)(?:-fast)?-claude-[ab]$/u.test(
       id,
     )
     || /^matrix-gpt-[\d.]+-(?:luna|terra|sol|astra)-claude-tool$/u.test(id)

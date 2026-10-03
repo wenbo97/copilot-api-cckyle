@@ -11,6 +11,7 @@ import path from "node:path"
 import { BudgetLedger, record, type Reservation } from "./local-budget"
 import { readCacheAuthorization } from "./local-cache-authorization"
 import { readE2eAuthorization } from "./local-e2e-authorization"
+import { readLatestAuthorization } from "./local-latest-authorization"
 import { LiveTime } from "./local-live-time"
 import {
   assertMatrixScope,
@@ -426,13 +427,23 @@ function checkLegacyAdmission(
   if (used >= group.cap)
     throw new Error("Additional scenario attempt limit reached")
 }
-/** Separate source evidence while retaining one locked, cumulative budget. */
-export function openBudget(input: {
+interface BudgetInput {
   directory: string
   maxCredits: number
   previous: Array<{ id: string; durationMs: number }>
   options: ContinuationOptions
-}) {
+}
+/** Separate source evidence while retaining one locked, cumulative budget. */
+export function openBudget(input: BudgetInput) {
+  if (input.options.authorizationFile) {
+    const saved = record(
+      JSON.parse(readFileSync(input.options.authorizationFile, "utf8")),
+    )
+    if (saved.version === 5) return openLatestBudget(input, saved)
+  }
+  return openHistoricalBudget(input)
+}
+function openHistoricalBudget(input: BudgetInput) {
   const { directory, maxCredits, previous, options } = input
   if (
     !options.budgetDirectory
@@ -501,6 +512,77 @@ export function openBudget(input: {
       summary,
       release,
       shared,
+    }
+  } catch (error) {
+    release()
+    throw error
+  }
+}
+
+function openLatestBudget(
+  input: Parameters<typeof openBudget>[0],
+  saved: Record<string, unknown>,
+) {
+  const auth = readLatestAuthorization(saved)
+  const { directory, maxCredits, previous, options } = input
+  if (
+    path.resolve(directory) !== auth.budgetDirectory
+    || (options.budgetDirectory
+      && path.resolve(options.budgetDirectory) !== auth.budgetDirectory)
+    || maxCredits !== auth.additionalCredits
+  )
+    throw new Error("Latest round requires its original directory and limits")
+  const release = acquireLock(directory, directory)
+  try {
+    const origin = path.join(directory, "authorization-origin.json")
+    const serialized = JSON.stringify(saved)
+    const ledgerFile = path.join(directory, "ledger.jsonl")
+    if (existsSync(origin) && readFileSync(origin, "utf8") !== serialized)
+      throw new Error("Latest authorization origin changed")
+    if (existsSync(ledgerFile) && !existsSync(origin))
+      throw new Error("Latest ledger origin missing")
+    if (
+      existsSync(ledgerFile)
+      && (!existsSync(`${ledgerFile}.checkpoint.json`)
+        || !existsSync(path.join(directory, "live-time.json")))
+    )
+      throw new Error("Latest ledger or clock checkpoint missing")
+    const ledger = new BudgetLedger(
+      ledgerFile,
+      maxCredits,
+      auth.additionalAttempts,
+    )
+    ledger.enableCheckpoint()
+    ledger.activateAuthorization(auth.roundId, serialized)
+    if (!existsSync(origin))
+      writeFileSync(origin, serialized, { encoding: "utf8", flag: "wx" })
+    restoreSafetyStop(directory, ledger, true)
+    const clock = new LiveTime(directory, previous)
+    const contract: Contract = {
+      matrix: auth,
+      baseAttempts: 0,
+      baseCredits: 0,
+      baseElapsedMs: 0,
+      additionalCredits: auth.additionalCredits,
+      additionalAttempts: auth.additionalAttempts,
+      additionalMinutes: auth.additionalMinutes,
+    }
+    const context = { ledger, clock, contract }
+    ledger.beforeReserve = (credits, request) =>
+      checkAdmission(context, credits, request)
+    return {
+      ledger,
+      clock,
+      release,
+      shared: false,
+      expired: () => expired(context),
+      summary: () => ({
+        ...contract,
+        budgetDirectory: directory,
+        attempts: ledger.grants.length,
+        reservedCredits: ledger.summary().reservedCredits,
+        elapsedMs: clock.elapsedMs(),
+      }),
     }
   } catch (error) {
     release()

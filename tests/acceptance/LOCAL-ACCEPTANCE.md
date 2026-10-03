@@ -1,5 +1,85 @@
 # Budgeted local acceptance
 
+## Latest-commit six-model acceptance
+
+Fresh native Windows sandbox homes require administrator-approved initialization;
+see [OpenAI's Windows sandbox guide](https://learn.chatgpt.com/docs/windows/windows-sandbox).
+When a synthetic admission home has already completed that initialization, pass
+`--codex-fixture-dir <absolute-or-relative-fixture-path>` to reuse it. Only
+`tests/_runlog/client-fixtures/copilot-codex-admission-XXXXXX` directories are
+accepted, and the path is bound to the round authorization. Codex then uses that
+owned home with independent threads across models; Claude configuration homes
+remain separate. Personal client homes and configuration are never imported.
+The preflight requires the native setup marker and still verifies an actual
+read-only shell read with approval never; reuse does not bypass the sandbox.
+
+`--verify-evidence --output-dir <completed-round>` validates saved authorization,
+source manifests, ledger checkpoint, cases and diagnostics without authentication
+or generation. It writes separate `REPORT-verified.md` and `summary-verified.json`
+artifacts, preserving the live report. Identical logger replays are deduplicated
+by request ID with the first correlation retained; conflicting payloads fail.
+The live execution identity and verifier identity are recorded separately.
+
+The `latest` profile runs a reusable, independently budgeted acceptance round.
+It defaults to gpt-6-luna, gpt-5.6-luna,
+gpt-6-sol, gpt-6.1-sol, gpt-5.6-terra and gpt-6-astra, all with explicit low
+reasoning. Its ceilings are 500 conservative reserved credits, 60 upstream
+attempts and 45 active live minutes; admission stops before 450 credits.
+These are tool ceilings, not standing authorization to consume account credits.
+Every live invocation requires `--approval-reference` recording reviewed approval
+for the current account, exact models and budget. The reference is bound to the
+local authorization and cannot change on continuation. Historical version-5
+references remain readable; no previous incident approval is inferred for a new run.
+
+```powershell
+bun run acceptance:local --profile latest --dry-run
+bun --no-env-file run acceptance:local --profile latest
+bun --no-env-file run acceptance:local --profile latest --live `
+  --output-dir tests/_runlog/my-reviewed-round `
+  --approval-reference "Reference to reviewed current-account/model/budget approval"
+```
+
+Optional `--models`, `--max-credits`, `--max-attempts` and `--max-minutes` can
+narrow the approved scope. Other models and wider limits are rejected before
+side effects. Keep the same output directory and authorization for continuation;
+changing limits or source, missing checkpoints, and a persisted stop fail closed.
+An interruption during the six-request cache experiment also prevents live
+continuation: its fingerprints use a process-local HMAC key. The original round
+remains incomplete; its requests are never replayed to reset the comparison.
+The existing 4141 service is preserved. The runner owns 4142 and authenticates
+only through the current VS Code Bridge on 18774, using isolated application
+state, client homes and history receipts. Existing user configuration is not edited.
+
+All six models run Responses JSON, Messages JSON, actual Codex shell reads and
+Claude Code Read turns. Tool fixtures contain unpredictable markers absent from
+the prompt; tool execution and the last completed answer are verified separately.
+The CLI paths also exercise both streaming protocols. Luna additionally covers
+parallel tools, six off/prefix-v1 catalogue requests, cancellation/recovery,
+Bridge refresh, and seed/fork/resume across an owned proxy restart. The nominal
+plan needs 52 attempts, leaving eight slots for internal retries. It does not
+retry failed cases until they pass. Detailed fault, fallback and native Messages
+contracts remain offline-only for this selected Responses-only model catalogue.
+
+The offline suite, typecheck, build, 300 simulated route requests and both real
+CLI loopback tool-admission preflights precede paid admission. Source-bound
+version-5 authorization, a durable locked ledger and active-time checkpoints
+protect the whole round. A case failure continues with independent cases;
+account, global budget, source and service failures stop admission.
+
+The conservative tariff snapshot was verified on 2026-10-02 against GitHub's
+Copilot price table. Review that snapshot before a new paid experiment; it is not
+an assertion that current prices have been fetched automatically. Default output
+directory names use the current date. Every run writes its authorization and
+evidence under git-ignored `tests/_runlog/`; they are never bundled as approval
+for another checkout. See [the sanitized 2026-10-02 result](LATEST-ACCEPTANCE-2026-10-02.md)
+for historical six-model coverage.
+
+Reports contain exact-model coverage and explicit unknown usage. Provider usage
+and conservative reservations are different observations; neither independently
+audits account debits. Cache hits or equal answers do not establish incremental
+prefix-v1 savings. Raw CLI logs and isolated session files are local diagnostic
+artifacts, not publication-ready reports. Existing historical reports are retained.
+
 Observed results: [2026-09-29 consolidated acceptance report](../../LOCAL-ACCEPTANCE-REPORT-2026-09-29.md).
 
 Subsequent repairs and qualified rechecks:

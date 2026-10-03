@@ -29,6 +29,7 @@ export function executionManifest(directory = root): Record<string, string> {
     "bun.lock",
     "tsconfig.json",
     "tsdown.config.ts",
+    "scripts/usage-summary.ts",
   ]) {
     if (existsSync(path.join(directory, relative))) visit(relative)
   }

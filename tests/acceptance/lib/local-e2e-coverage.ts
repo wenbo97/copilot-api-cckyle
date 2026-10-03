@@ -2,6 +2,7 @@ import type { Grant, Observation } from "./local-budget"
 
 import { record } from "./local-budget"
 import { e2eCases } from "./local-e2e-authorization"
+import { latestCases } from "./local-latest-authorization"
 
 function count(value: unknown): number | undefined {
   return (
@@ -18,10 +19,11 @@ export function summarizeE2eCoverage(input: {
   models: Array<string>
   cases: Array<{ id: string; status: string }>
   roundId: string
-  stage: "matrix" | "legacy"
+  stage: "matrix" | "legacy" | "latest"
 }) {
   const { grants, observations, models, cases, roundId, stage } = input
-  const authorizedCases: Partial<ReturnType<typeof e2eCases>> = e2eCases(stage)
+  const authorizedCases: Partial<ReturnType<typeof e2eCases>> =
+    stage === "latest" ? latestCases(models) : e2eCases(stage)
   return models.map((model) => {
     const selected = grants.filter(
       (grant) => grant.roundId === roundId && grant.model === model,

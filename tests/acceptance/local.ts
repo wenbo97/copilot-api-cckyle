@@ -65,7 +65,10 @@ const includeSoak =
   && (selectedIds.length === 0
     || selectedIds.some((id) => ["soak", "soak-recheck"].includes(id)))
 
-if (args.includes("--help")) {
+if (args.includes("--profile")) {
+  const { runLatest } = await import("./lib/local-latest-runner")
+  await runLatest(args)
+} else if (args.includes("--help")) {
   console.log(
     "bun run acceptance:local [--list|--dry-run|--live] [--only id,id] [--max-credits 1000] [--output-dir path]\nCross-version followup: --budget-dir historical-path --max-additional-credits 30 --max-additional-attempts 20 --max-additional-minutes 15\nNew approved round: add --authorization-file path (drafts are rejected; historical stops and cumulative limits remain).\nE2E: --e2e --stage matrix|legacy with the historical --budget-dir, fixed stage limits and one output directory.\nDefault: offline checks only. Live: wenbo97 bridge, Luna/low, OpenAI-only, 4143, 20-minute soak.\nReuse --output-dir to retain the budget ledger across targeted reruns. No automatic model upgrades or inference retries.",
   )

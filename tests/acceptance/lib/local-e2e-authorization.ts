@@ -277,7 +277,7 @@ export function readE2eAuthorization(
   }
 }
 export function e2eRate(
-  authorization: E2eAuthorization,
+  authorization: Pick<E2eAuthorization, "prices">,
   model: string,
   inputTokens: number,
 ) {

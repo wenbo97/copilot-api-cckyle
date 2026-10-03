@@ -9,11 +9,11 @@ import {
 } from "node:fs"
 
 import { readCacheAuthorization } from "./local-cache-authorization"
+import { e2eRate } from "./local-e2e-authorization"
 import {
-  e2eRate,
-  readE2eAuthorization,
-  type E2eAuthorization,
-} from "./local-e2e-authorization"
+  readObservedAuthorization,
+  type ObservedAuthorization,
+} from "./local-latest-authorization"
 import {
   assertMatrixScope,
   MATRIX_RATES,
@@ -95,7 +95,7 @@ interface Observed extends Observation {
 
 export class BudgetLedger {
   private matrix?: MatrixAuthorization
-  private e2e?: E2eAuthorization
+  private e2e?: ObservedAuthorization
   stopReason?: string
   private readonly stops: Array<string> = []
   private readonly authorizations = new Map<
@@ -188,10 +188,7 @@ export class BudgetLedger {
       serialized,
       stops: this.stops.length,
     })
-    this.e2e =
-      authorization.version === 4 ?
-        readE2eAuthorization(authorization)
-      : undefined
+    this.e2e = readObservedAuthorization(authorization)
     if (this.e2e) this.assertE2eBaseline(this.e2e)
     this.stopReason ??=
       "Explicit authorization file required for round continuation"
@@ -306,7 +303,7 @@ export class BudgetLedger {
   activateAuthorization(roundId: string, serialized: string) {
     const saved = record(JSON.parse(serialized))
     let matrix: MatrixAuthorization | undefined
-    const e2e = saved.version === 4 ? readE2eAuthorization(saved) : undefined
+    const e2e = readObservedAuthorization(saved)
     if (e2e) matrix = e2e
     else if (saved.version === 3) matrix = readCacheAuthorization(saved)
     else if (saved.version === 2) matrix = readMatrixAuthorization(saved)
@@ -348,7 +345,7 @@ export class BudgetLedger {
     this.e2e = e2e
   }
 
-  private assertE2eBaseline(authorization: E2eAuthorization) {
+  private assertE2eBaseline(authorization: ObservedAuthorization) {
     if (
       authorization.baseAttempts !== this.grants.length
       || Math.abs(authorization.baseCredits - this.summary().reservedCredits)

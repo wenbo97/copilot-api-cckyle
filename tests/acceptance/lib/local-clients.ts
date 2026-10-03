@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import {
   existsSync,
   mkdirSync,
@@ -34,6 +35,7 @@ export interface Session {
   codexHome: string
   claudeHome: string
   thread?: string
+  marker?: string
 }
 const sessions = new WeakMap<AcceptanceRuntime, Map<string, Session>>()
 
@@ -42,6 +44,10 @@ function session(runtime: AcceptanceRuntime, model = MODEL): Session {
   const existing = models.get(model)
   if (existing) return existing
   const created = prepareClientFixtures(model)
+  if (runtime.e2e?.stage === "latest" && runtime.e2e.codexFixtureDirectory) {
+    created.directory = runtime.e2e.codexFixtureDirectory
+    created.codexHome = path.join(created.directory, "codex")
+  }
   models.set(model, created)
   sessions.set(runtime, models)
   return created
@@ -77,7 +83,7 @@ export function prepareClientFixtures(model = MODEL): Session {
   return created
 }
 
-async function capture(
+export async function capture(
   bin: string,
   args: Array<string>,
   options: {
@@ -86,6 +92,7 @@ async function capture(
     guardReason?: () => string | undefined
     evidence?: (events: Array<Json>, exitCode: number | null) => void
     timeoutMs?: number
+    rawFile?: string
   },
 ) {
   const { cwd, env } = options
@@ -124,6 +131,10 @@ async function capture(
       new Response(child.stderr).text(),
       child.exited,
     ])
+    if (options.rawFile) {
+      writeFileSync(`${options.rawFile}.stdout.jsonl`, stdout, "utf8")
+      writeFileSync(`${options.rawFile}.stderr.log`, stderr, "utf8")
+    }
     const events: Array<Json> = []
     for (const line of stdout.split(/\r?\n/u)) {
       try {
@@ -171,6 +182,8 @@ export async function codex(
   const startedAt = Date.now()
   const model = options.model ?? MODEL
   const data = options.fixture ?? session(runtime, model)
+  const evidenceId =
+    runtime.e2e?.stage === "latest" ? `${id}-${randomUUID()}` : id
   await runtime.management("configure", {
     caseId: id,
     phase: options.phase ?? "clients",
@@ -224,6 +237,10 @@ export async function codex(
   args.push(prompt)
   const events = await capture(Bun.which("codex") ?? "codex", args, {
     cwd: data.directory,
+    rawFile:
+      runtime.e2e?.stage === "latest" ?
+        path.join(runtime.directory, evidenceId)
+      : undefined,
     timeoutMs: options.timeoutMs,
     guardReason: () => {
       if (runtime.halted) return "Acceptance halted"
@@ -231,8 +248,9 @@ export async function codex(
       return blocked ? stringValue(blocked.reason) : undefined
     },
     evidence: (events, exitCode) =>
-      saveClientEvidence(runtime, id, {
+      saveClientEvidence(runtime, evidenceId, {
         client: "codex",
+        marker: data.marker,
         events: [...events, ...rolloutToolEvents(data.codexHome, startedAt)],
         exitCode,
       }),
@@ -271,6 +289,7 @@ export async function runClaudeCase(
 ) {
   const { model, withTool } = options
   const data = session(runtime, model)
+  if (withTool && runtime.e2e?.stage === "latest") randomizeMarker(data)
   await runtime.management("configure", { caseId: id, phase: "clients" })
   const settings = path.join(data.claudeHome, "acceptance-settings.json")
   const prompt =
@@ -300,8 +319,17 @@ export async function runClaudeCase(
     ],
     {
       cwd: data.directory,
+      rawFile:
+        runtime.e2e?.stage === "latest" ?
+          path.join(runtime.directory, id)
+        : undefined,
       evidence: (events, exitCode) =>
-        saveClientEvidence(runtime, id, { client: "claude", events, exitCode }),
+        saveClientEvidence(runtime, id, {
+          client: "claude",
+          events,
+          exitCode,
+          marker: data.marker,
+        }),
       guardReason: () => {
         if (runtime.halted) return "Acceptance halted"
         const blocked = runtime.blocked.findLast((row) => row.caseId === id)
@@ -324,9 +352,10 @@ export async function runClaudeCase(
   )
   const result = events.find((event) => event.type === "result")
   assert(result && !result.is_error, "Claude Code returned an error")
-  if (withTool) assertToolEvidence("claude", events)
+  if (withTool) assertToolEvidence("claude", events, data.marker)
   assert(
-    String(result.result).trim() === (withTool ? "LOCAL_TOOL_42" : "READY"),
+    String(result.result).trim()
+      === (withTool ? (data.marker ?? "LOCAL_TOOL_42") : "READY"),
     "Claude Code final text mismatch",
   )
   return withTool ?
@@ -341,10 +370,11 @@ function saveClientEvidence(
     client: "claude" | "codex"
     events: Array<Json>
     exitCode: number | null
+    marker?: string
   },
 ) {
   const { client, events, exitCode } = result
-  const evidence = projectClientEvents(events)
+  const evidence = projectClientEvents(events, result.marker)
   const verdict = clientVerdict(client, evidence)
   writeFileSync(
     path.join(runtime.directory, `${id}-client-evidence.json`),
@@ -385,8 +415,12 @@ function rolloutToolEvents(home: string, startedAt: number): Array<Json> {
   return events.slice(-100)
 }
 
-function assertToolEvidence(client: "claude" | "codex", events: Array<Json>) {
-  const verdict = clientVerdict(client, projectClientEvents(events))
+function assertToolEvidence(
+  client: "claude" | "codex",
+  events: Array<Json>,
+  marker?: string,
+) {
+  const verdict = clientVerdict(client, projectClientEvents(events, marker))
   if (verdict.blocked)
     throw new AcceptanceBlockedError(`${client} shell/tool admission blocked`)
   assert(
@@ -402,16 +436,33 @@ export async function runCodexToolCase(
   id: string,
   model: string,
 ) {
+  const data = session(runtime, model)
+  if (runtime.e2e?.stage === "latest") randomizeMarker(data)
   const result = await codex(runtime, id, {
     model,
     prompt: String.raw`Read marker.txt in the current directory using exactly one exec_command with cmd Get-Content -Raw .\marker.txt and login false. If using the exec JavaScript tool, start the cell with // @exec: {"yield_time_ms": 60000} and print the complete exec_command result object including exit_code. Wait for any running tool to finish before answering. Reply only with the file content. Do not inspect other files or retry a denied command.`,
   })
-  const verdict = clientVerdict("codex", projectClientEvents(result.events))
+  const verdict = clientVerdict(
+    "codex",
+    projectClientEvents(result.events, data.marker),
+  )
   if (verdict.blocked)
     throw new AcceptanceBlockedError("Codex shell admission blocked")
   assert(verdict.toolExecution, "Codex shell execution failed or unverified")
-  assert(result.text === "LOCAL_TOOL_42", "Codex tool round-trip lost marker")
+  assert(
+    result.text === (data.marker ?? "LOCAL_TOOL_42"),
+    "Codex tool round-trip lost marker",
+  )
   return "Read-only synthetic file tool step and exact result"
+}
+
+function randomizeMarker(data: Session) {
+  data.marker = `LATEST_TOOL_${randomUUID().replaceAll("-", "").toUpperCase()}`
+  writeFileSync(
+    path.join(data.directory, "marker.txt"),
+    `${data.marker}\n`,
+    "utf8",
+  )
 }
 
 export const CLIENTS: Array<Scenario> = [

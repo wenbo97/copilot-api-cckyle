@@ -1,7 +1,12 @@
 import { E2E_LIMITS } from "./local-e2e-authorization"
+import { latestOptions } from "./local-latest-options"
 
 /** Reject ambiguous invocations before any offline work or live authentication. */
 export function validateArguments(args: Array<string>): void {
+  if (args.includes("--profile")) {
+    latestOptions(args)
+    return
+  }
   const switches = new Set([
     "--list",
     "--dry-run",

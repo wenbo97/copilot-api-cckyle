@@ -1,22 +1,39 @@
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { parseArgs } from "node:util"
 
 import { record } from "../lib/local-budget"
 import {
   codexSandboxArgs,
   createClientDirectory,
+  resolveCodexFixtureDirectory,
 } from "../lib/local-client-config"
 import { textEvidence } from "../lib/local-client-evidence"
 import { childEnvironment } from "../lib/local-runtime"
 
-const directory = createClientDirectory("copilot-codex-admission-")
+const args = parseArgs({
+  args: process.argv.slice(2),
+  allowPositionals: true,
+  options: {
+    "fixture-dir": { type: "string" },
+    "legacy-no-sandbox": { type: "boolean" },
+  },
+})
+const preparedFixture = args.values["fixture-dir"]
+const directory =
+  preparedFixture ?
+    resolveCodexFixtureDirectory(preparedFixture)
+  : createClientDirectory("copilot-codex-admission-")
 const codexHome = path.join(directory, "codex")
-mkdirSync(codexHome)
+if (
+  preparedFixture
+  && !existsSync(path.join(codexHome, ".sandbox/setup_marker.json"))
+)
+  throw new Error("Prepared native sandbox setup marker missing")
+mkdirSync(codexHome, { recursive: true })
 writeFileSync(path.join(directory, "marker.txt"), "LOCAL_TOOL_42\n")
-const command =
-  process.argv.slice(2).find((argument) => argument !== "--legacy-no-sandbox")
-  ?? String.raw`Get-Content -Raw .\marker.txt`
-const input = `// @exec: {"yield_time_ms": 60000}\nconst r = await tools.exec_command(${JSON.stringify({ cmd: command, login: false })}); text(JSON.stringify(r));`
+const command = args.positionals[0] ?? String.raw`Get-Content -Raw .\marker.txt`
+const input = `// @exec: {"yield_time_ms": 60000}\nconst r = await tools.exec_command(${JSON.stringify({ cmd: command, login: false, workdir: directory })}); text(JSON.stringify(r));`
 let requests = 0
 const toolOutputs: Array<unknown> = []
 const server = Bun.serve({
@@ -74,7 +91,28 @@ const server = Bun.serve({
         type: "response.created",
         response: { ...response, status: "in_progress", output: [] },
       },
-      { type: "response.output_item.added", output_index: 0, item },
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item:
+          requests === 1 ? { ...item, input: "", status: "in_progress" } : item,
+      },
+      ...(requests === 1 ?
+        [
+          {
+            type: "response.custom_tool_call_input.delta",
+            output_index: 0,
+            item_id: item.id,
+            delta: input,
+          },
+          {
+            type: "response.custom_tool_call_input.done",
+            output_index: 0,
+            item_id: item.id,
+            input,
+          },
+        ]
+      : []),
       { type: "response.output_item.done", output_index: 0, item },
       { type: "response.completed", response },
     ]

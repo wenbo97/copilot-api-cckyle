@@ -381,7 +381,7 @@ async function refresh(
   return "Bridge refresh and real upstream request completed"
 }
 
-async function runKind(
+export async function runKind(
   runtime: AcceptanceRuntime,
   scenario: { id: string; model: string; kind: E2eKind },
 ): Promise<string> {

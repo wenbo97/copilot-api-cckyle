@@ -3,7 +3,7 @@ import { record, stringValue, type Json } from "./local-budget"
 const MARKER = "LOCAL_TOOL_42"
 
 /** Only synthetic acceptance content is retained; reasoning and arbitrary text are omitted. */
-export function textEvidence(value: unknown): Json {
+export function textEvidence(value: unknown, marker = MARKER): Json {
   let text = JSON.stringify(value ?? null)
   if (typeof value === "string") text = value
   else if (Array.isArray(value)) {
@@ -15,8 +15,8 @@ export function textEvidence(value: unknown): Json {
   }
   return {
     characters: text.length,
-    markerPresent: text.includes(MARKER),
-    exactMarker: text.trim() === MARKER,
+    markerPresent: text.includes(marker),
+    exactMarker: text.trim() === marker,
     blocked: /reject|denied|not allowed|blocked|policy/iu.test(text),
     exitCodeZero: /"?exit_code"?\s*:\s*0|Process exited with code 0/u.test(
       text,
@@ -66,7 +66,10 @@ export function readArguments(value: unknown): Json {
   }
 }
 
-export function projectClientEvents(events: Array<Json>): Array<Json> {
+export function projectClientEvents(
+  events: Array<Json>,
+  marker?: string,
+): Array<Json> {
   const result: Array<Json> = []
   for (const event of events) {
     const item = record(
@@ -78,11 +81,11 @@ export function projectClientEvents(events: Array<Json>): Array<Json> {
         type: "result",
         isError: event.is_error,
         subtype: event.subtype,
-        final: textEvidence(event.result),
+        final: textEvidence(event.result, marker),
         usage: event.usage,
       })
     if (type === "agent_message")
-      result.push({ type, final: textEvidence(item.text) })
+      result.push({ type, final: textEvidence(item.text, marker) })
     if (
       [
         "command_execution",
@@ -97,8 +100,8 @@ export function projectClientEvents(events: Array<Json>): Array<Json> {
         name: item.name,
         status: item.status,
         exitCode: item.exit_code,
-        command: textEvidence(item.command ?? item.input),
-        output: textEvidence(item.aggregated_output ?? item.output),
+        command: textEvidence(item.command ?? item.input, marker),
+        output: textEvidence(item.aggregated_output ?? item.output, marker),
       })
     }
     const message = record(event.message)
@@ -116,7 +119,7 @@ export function projectClientEvents(events: Array<Json>): Array<Json> {
             type: "read_result",
             callId: block.tool_use_id,
             isError: block.is_error === true,
-            output: textEvidence(block.content),
+            output: textEvidence(block.content, marker),
           })
       }
     if (
