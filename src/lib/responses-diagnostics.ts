@@ -1,7 +1,7 @@
 import type { ServerSentEventMessage } from "fetch-event-stream"
 
 import consola from "consola"
-import { createHmac, randomBytes, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 
 import type { CachePolicySummary } from "~/lib/responses-cache-policy"
 import type {
@@ -10,16 +10,33 @@ import type {
 } from "~/services/copilot/request-observer"
 
 import {
+  cacheFingerprint as fingerprint,
+  cacheDiagnosticProcessScope,
+} from "~/lib/cache-fingerprint"
+import {
+  cacheHintObservation,
+  compareCacheHints,
+  type CacheHintObservation,
+} from "~/lib/cache-hint-observation"
+import {
+  cacheDiagnosticIdentity,
+  cacheHistorySnapshot,
+  CacheHistoryTracker,
+  type CacheDiagnosticIdentity,
+  type CacheHistorySnapshot,
+} from "~/lib/cache-history"
+import {
   type CacheIngressProtocol,
   type CacheIntentSummary,
   inspectCacheIntent,
 } from "~/lib/cache-intent"
 import { HTTPError, InvalidRequestError } from "~/lib/error"
+import { state } from "~/lib/state"
 import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
 
 // Fingerprints can be compared within this process, but cannot be used to
 // dictionary-match prompts against unsalted, persistent content hashes.
-const fingerprintKey = randomBytes(32)
+const historyTracker = new CacheHistoryTracker()
 
 type JsonRecord = Record<string, unknown>
 type Count = number | null
@@ -39,11 +56,15 @@ export interface ResponsesDiagnosticOrigin {
   cacheIntent: CacheIntentSummary | null
   ingressFingerprints?: JsonRecord
   ingressStaticPrefix?: JsonRecord
+  identity?: CacheDiagnosticIdentity
+  history?: CacheHistorySnapshot
+  hints?: CacheHintObservation
 }
 
 export function responsesDiagnosticOrigin(
   ingressProtocol: CacheIngressProtocol,
   payload: unknown,
+  headers?: Headers,
 ): ResponsesDiagnosticOrigin | undefined {
   if (!["1", "true"].includes(process.env.COPILOT_CACHE_DIAGNOSTICS ?? ""))
     return
@@ -55,6 +76,9 @@ export function responsesDiagnosticOrigin(
       cacheIntent: inspectCacheIntent(payload, ingressProtocol),
       ingressFingerprints: fingerprints(ingress),
       ingressStaticPrefix: staticPrefix(ingress),
+      identity: cacheDiagnosticIdentity(payload, headers),
+      history: cacheHistorySnapshot(ingress),
+      hints: cacheHintObservation(payload, ingressProtocol),
     }
   } catch {
     // Optional diagnostics must not turn a valid request into a failure.
@@ -66,6 +90,7 @@ interface CacheUsage {
   input_tokens: Count
   cached_input_tokens: Count
   cache_write_tokens: Count
+  ordinary_input_tokens: Count
   output_tokens: Count
   reasoning_tokens: Count
   usage_complete: boolean
@@ -85,6 +110,12 @@ interface AttemptSummary extends CacheUsage {
   upstream_error_status: number | null
   outcome: string
   error_code: string | null
+  history_comparison: JsonRecord
+  cache_hint_processing: ReturnType<typeof compareCacheHints> & {
+    policy: CachePolicySummary | null
+  }
+  service_tier: string | null
+  prompt_cache_diagnostics: JsonRecord | null
 }
 
 /** Opt-in summaries only; it neither changes the request nor infers a session. */
@@ -105,6 +136,13 @@ export class ResponsesDiagnostics {
   private activeStream = false
   private incomplete = false
   private readonly signal?: AbortSignal
+  private readonly ingressHistory: CacheHistorySnapshot
+  private readonly ingressHints: CacheHintObservation
+  private readonly historyTicket: ReturnType<CacheHistoryTracker["begin"]>
+  private activeHistory?: CacheHistorySnapshot
+  private returnedServiceTier: string | null = null
+  private providerDiagnostics: JsonRecord | null = null
+  private readonly cachePolicy?: CachePolicySummary
 
   static start(context: DiagnosticsContext): ResponsesDiagnostics | undefined {
     if (!["1", "true"].includes(process.env.COPILOT_CACHE_DIAGNOSTICS ?? ""))
@@ -119,10 +157,15 @@ export class ResponsesDiagnostics {
   private constructor(context: DiagnosticsContext) {
     const { ingress, egress, serializedBody, signal } = context
     this.signal = signal
+    this.cachePolicy = context.cachePolicy
     const origin =
       context.origin ?? responsesDiagnosticOrigin("responses", ingress)
     const ingressObservation = ingressSnapshot(ingress, origin)
     this.requestId = origin?.requestId ?? randomUUID()
+    const history = diagnosticHistoryContext(ingress, origin)
+    this.ingressHistory = history.ingress
+    this.ingressHints = history.hints
+    this.historyTicket = history.ticket
     const body = record(egress)
     this.request = {
       schema_version: 2,
@@ -143,8 +186,7 @@ export class ResponsesDiagnostics {
         ),
       input_items: Array.isArray(body.input) ? body.input.length : null,
       // Cache keys may be shared across threads. They are not session IDs.
-      correlation: "uncorrelated",
-      request_role: "unknown",
+      ...history.observation,
       cache_key_fingerprint: fingerprint(body.prompt_cache_key),
       ingress_fingerprints: ingressObservation.fingerprints,
       egress_fingerprints: fingerprints(egress),
@@ -158,6 +200,10 @@ export class ResponsesDiagnostics {
     const body = record(response)
     this.usage = readUsage(body)
     const status = body.status
+    this.returnedServiceTier = serviceTier(body.service_tier)
+    this.providerDiagnostics = providerCacheDiagnostics(
+      body.prompt_cache_diagnostics,
+    )
     this.outcome =
       status === "completed" || status === "incomplete" || status === "failed" ?
         status
@@ -170,6 +216,7 @@ export class ResponsesDiagnostics {
   ): void {
     this.finishAttempt()
     this.activeAttempt = undefined
+    this.activeHistory = undefined
     this.attempts++
     if (serializedBody === undefined) return
     if (this.attemptDetails.length >= 16) {
@@ -177,6 +224,7 @@ export class ResponsesDiagnostics {
       return
     }
     const body: unknown = JSON.parse(serializedBody)
+    this.activeHistory = cacheHistorySnapshot(body)
     this.activeStream = record(body).stream === true
     const bytes = Buffer.byteLength(serializedBody, "utf8")
     if (this.attempts === 1) this.request.request_body_bytes ??= bytes
@@ -192,6 +240,19 @@ export class ResponsesDiagnostics {
       upstream_error_status: null,
       outcome: "pending",
       error_code: null,
+      history_comparison: this.historyTicket.compare(
+        this.ingressHistory,
+        this.activeHistory,
+      ),
+      cache_hint_processing: {
+        ...compareCacheHints(
+          this.ingressHints,
+          cacheHintObservation(body, "responses"),
+        ),
+        policy: this.cachePolicy ?? null,
+      },
+      service_tier: null,
+      prompt_cache_diagnostics: null,
       ...readUsage(undefined),
     }
     this.attemptDetails.push(this.activeAttempt)
@@ -220,6 +281,12 @@ export class ResponsesDiagnostics {
     const response =
       Object.hasOwn(event, "response") ? record(event.response) : event
     Object.assign(this.activeAttempt, readUsage(response, this.activeAttempt))
+    if (Object.hasOwn(response, "service_tier"))
+      this.activeAttempt.service_tier = serviceTier(response.service_tier)
+    if (Object.hasOwn(response, "prompt_cache_diagnostics"))
+      this.activeAttempt.prompt_cache_diagnostics = providerCacheDiagnostics(
+        response.prompt_cache_diagnostics,
+      )
     const terminal =
       !this.activeStream
       || [
@@ -300,6 +367,21 @@ export class ResponsesDiagnostics {
     if (this.finished) return
     this.finished = true
     this.finishAttempt()
+    this.passive(() => {
+      this.request.history_comparison = this.historyTicket.compare(
+        this.ingressHistory,
+        this.activeHistory,
+      )
+      this.historyTicket.finish(
+        this.ingressHistory,
+        this.activeHistory,
+        this.outcome === "completed"
+          && this.activeAttempt?.outcome === "completed"
+          && !this.incomplete
+          && !this.signal?.aborted,
+      )
+      this.request.history_state = historyTracker.statistics()
+    })
     this.passive(() =>
       consola.info(
         `[cache-diagnostics] ${JSON.stringify({
@@ -310,6 +392,8 @@ export class ResponsesDiagnostics {
           attempt_details_truncated: this.attempts > 16,
           diagnostics_incomplete: this.incomplete,
           ...this.usage,
+          returned_service_tier: this.returnedServiceTier,
+          prompt_cache_diagnostics: this.providerDiagnostics,
           outcome:
             this.outcome
             ?? (this.signal?.aborted ?
@@ -368,6 +452,37 @@ function ingressSnapshot(
   }
 }
 
+function diagnosticHistoryContext(
+  ingress: unknown,
+  origin: ResponsesDiagnosticOrigin | undefined,
+) {
+  const protocol = origin?.ingressProtocol ?? "responses"
+  const identity = origin?.identity ?? cacheDiagnosticIdentity(ingress)
+  const scope =
+    fingerprint({
+      account: state.accountType,
+      endpoint: state.responsesHistoryScope,
+      namespace: process.env.COPILOT_CACHE_NAMESPACE,
+      protocol,
+    }) ?? "process"
+  return {
+    ingress:
+      origin?.history
+      ?? cacheHistorySnapshot(ingressForFingerprints(ingress, protocol)),
+    hints: origin?.hints ?? cacheHintObservation(ingress, protocol),
+    ticket: historyTracker.begin(identity, scope),
+    observation: {
+      correlation: identity.thread ? "declared_thread" : "uncorrelated",
+      request_role: identity.role,
+      identity,
+      thread_fingerprint: identity.thread,
+      correlation_scope: scope,
+      process_scope: cacheDiagnosticProcessScope,
+      observed_at: new Date().toISOString(),
+    },
+  }
+}
+
 function ingressForFingerprints(
   value: unknown,
   protocol: CacheIngressProtocol,
@@ -394,6 +509,7 @@ function fingerprints(value: unknown): JsonRecord {
       text: body.text,
       parallel_tool_calls: body.parallel_tool_calls,
       tool_choice: body.tool_choice,
+      service_tier: body.service_tier,
       prompt_cache_options: body.prompt_cache_options,
       prompt_cache_retention: body.prompt_cache_retention,
     }),
@@ -456,11 +572,49 @@ function leadingStaticInput(value: unknown): Array<unknown> {
   return input
 }
 
-function fingerprint(value: unknown): string | null {
-  if (value === undefined || value === null) return null
-  return createHmac("sha256", fingerprintKey)
-    .update(JSON.stringify(value))
-    .digest("hex")
+function serviceTier(value: unknown): string | null {
+  return (
+      typeof value === "string"
+        && ["auto", "default", "fast", "flex", "priority", "scale"].includes(
+          value,
+        )
+    ) ?
+      value
+    : null
+}
+
+function providerCacheDiagnostics(value: unknown): JsonRecord | null {
+  const body = record(value)
+  if (typeof body.type !== "string") return null
+  if (
+    ![
+      "cache_hit",
+      "cache_miss",
+      "comparison_response_not_found",
+      "unavailable",
+    ].includes(body.type)
+  )
+    return null
+  const reasons = [
+    "model_changed",
+    "prompt_cache_key_changed",
+    "service_tier_changed",
+    "tools_changed",
+    "text_format_changed",
+    "reasoning_effort_changed",
+    "verbosity_changed",
+    "context_compacted",
+    "input_changed",
+  ]
+  return {
+    type: body.type,
+    reason:
+      typeof body.reason === "string" && reasons.includes(body.reason) ?
+        body.reason
+      : null,
+    comparison_reusable_tokens: count(body.comparison_reusable_tokens),
+    cache_missed_tokens: count(body.cache_missed_tokens),
+  }
 }
 
 function readUsage(value: unknown, previous?: CacheUsage): CacheUsage {
@@ -477,14 +631,16 @@ function readUsage(value: unknown, previous?: CacheUsage): CacheUsage {
     input !== null && reportedCached !== null && reportedCached > input ?
       null
     : reportedCached
+  const written = observedCount(
+    details,
+    "cache_write_tokens",
+    previous?.cache_write_tokens,
+  )
   return {
     input_tokens: input,
     cached_input_tokens: cached,
-    cache_write_tokens: observedCount(
-      details,
-      "cache_write_tokens",
-      previous?.cache_write_tokens,
-    ),
+    cache_write_tokens: written,
+    ordinary_input_tokens: ordinaryTokens(input, cached, written),
     output_tokens: observedCount(
       usage,
       "output_tokens",
@@ -504,6 +660,17 @@ function readUsage(value: unknown, previous?: CacheUsage): CacheUsage {
       previous?.copilot_nano_aiu,
     ),
   }
+}
+
+function ordinaryTokens(input: Count, cached: Count, written: Count): Count {
+  return (
+      input !== null
+        && cached !== null
+        && written !== null
+        && written <= input - cached
+    ) ?
+      input - cached - written
+    : null
 }
 
 function observedCount(

@@ -20,6 +20,15 @@ interface Sample {
   metrics: Record<MetricName, Count>
   attemptDetailsAvailable: boolean
   attemptDetails: Array<Record<MetricName, Count>>
+  role: string
+  thread: string | null
+  processScope: string | null
+  correlationScope: string | null
+  requestId: string | null
+  history: Record<string, unknown>
+  lifecycle: Record<string, unknown>
+  ttft: Count
+  duration: Count
 }
 interface Range {
   since?: number
@@ -85,6 +94,15 @@ function parseSample(text: string): { id: string; sample: Sample } | undefined {
         attemptDetailsAvailable ?
           parseAttemptDetails(body.attempt_details, attempts)
         : [],
+      role: requestRole(body.request_role),
+      thread: digest(body.thread_fingerprint),
+      processScope: uuid(body.process_scope),
+      correlationScope: digest(body.correlation_scope),
+      requestId: uuid(body.request_id),
+      history: historyObservation(body.history_comparison),
+      lifecycle: lifecycleObservation(body.identity),
+      ttft: count(body.ttft_ms),
+      duration: count(body.duration_ms),
     },
   }
 }
@@ -227,6 +245,7 @@ function summarizeAttempts(samples: Array<Sample>) {
 
 async function readSamples(file: string, range: Range) {
   const samples = new Map<string, Sample>()
+  const payloads = new Map<string, string>()
   const parsing = {
     malformed_records: 0,
     duplicate_records: 0,
@@ -250,12 +269,6 @@ async function readSamples(file: string, range: Range) {
         const match =
           /^(?:(\S+)\s+)?(?:\[info\]\s+)?\[cache-diagnostics\](.*)$/.exec(line)
         if (!match) continue
-        const timestamp = match[1] ? Date.parse(match[1]) : Number.NaN
-        if (!Number.isFinite(timestamp)) parsing.missing_timestamp_records++
-        if (outsideRange(timestamp, range)) {
-          parsing.filtered_records++
-          continue
-        }
         let parsed: ReturnType<typeof parseSample>
         try {
           parsed = parseSample(match[2])
@@ -266,7 +279,19 @@ async function readSamples(file: string, range: Range) {
           parsing.malformed_records++
           continue
         }
-        if (samples.has(parsed.id)) parsing.duplicate_records++
+        const observed: unknown = JSON.parse(match[2])
+        const observedAt = record(observed).observed_at
+        const timestamp = observedTimestamp(match[1], observedAt)
+        if (!Number.isFinite(timestamp)) parsing.missing_timestamp_records++
+        if (isReplay(payloads, parsed.id, match[2].trim())) {
+          parsing.duplicate_records++
+          continue
+        }
+        payloads.set(parsed.id, match[2].trim())
+        if (outsideRange(timestamp, range)) {
+          parsing.filtered_records++
+          continue
+        }
         samples.set(parsed.id, parsed.sample)
       }
     } finally {
@@ -277,6 +302,32 @@ async function readSamples(file: string, range: Range) {
     await handle.close()
   }
   return { samples: [...samples.values()], parsing }
+}
+
+function requestRole(value: unknown): string {
+  return (
+      typeof value === "string"
+        && ["compaction", "main", "memory", "prewarm", "subagent"].includes(
+          value,
+        )
+    ) ?
+      value
+    : "unknown"
+}
+
+function observedTimestamp(reporter: string | undefined, embedded: unknown) {
+  if (reporter) return Date.parse(reporter)
+  return typeof embedded === "string" ? Date.parse(embedded) : Number.NaN
+}
+
+function isReplay(payloads: Map<string, string>, id: string, payload: string) {
+  const previous = payloads.get(id)
+  if (previous === undefined) return false
+  if (previous !== payload)
+    throw new Error(
+      "Conflicting cache diagnostic records; original evidence was not overwritten",
+    )
+  return true
 }
 
 function outsideRange(timestamp: number, range: Range): boolean {
@@ -345,7 +396,10 @@ function formatGroup(
   return lines.join("\n")
 }
 
-function groupSamples(samples: Array<Sample>, key: "model" | "source") {
+function groupSamples(
+  samples: Array<Sample>,
+  key: "model" | "source" | "role",
+) {
   const groups = new Map<string, Array<Sample>>()
   for (const sample of samples) {
     const group = groups.get(sample[key]) ?? []
@@ -367,12 +421,13 @@ async function main() {
       since: { type: "string" },
       until: { type: "string" },
       json: { type: "boolean" },
+      history: { type: "boolean" },
       help: { type: "boolean" },
     },
   })
   if (values.help) {
     console.log(
-      "Usage: bun run usage:summary [logPath] [--since ISO8601] [--until ISO8601] [--json]\nDefault: tmps/cache-session.log; interval: [since, until)",
+      "Usage: bun run usage:summary [logPath] [--since ISO8601] [--until ISO8601] [--json] [--history]\nDefault: tmps/cache-session.log; interval: [since, until)",
     )
     return
   }
@@ -403,6 +458,7 @@ async function main() {
     by_source: bySource,
     parsing,
     limitations,
+    ...(values.history ? { history: historyReport(samples) } : {}),
   }
   if (values.json) {
     console.log(JSON.stringify(report, null, 2))
@@ -422,7 +478,256 @@ async function main() {
         formatGroup(name, group),
       ),
       `Parsing statistics: ${JSON.stringify(parsing)}`,
+      ...(values.history ?
+        [
+          "History analysis (structural evidence; unread input is not necessarily a preventable miss)",
+          JSON.stringify(historyReport(samples), null, 2),
+        ]
+      : []),
     ].join("\n\n"),
+  )
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ?
+      (value as Record<string, unknown>)
+    : {}
+}
+
+function digest(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ?
+      value
+    : null
+}
+
+function uuid(value: unknown): string | null {
+  return (
+      typeof value === "string"
+        && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(value)
+    ) ?
+      value.toLowerCase()
+    : null
+}
+
+function historyObservation(value: unknown) {
+  const body = record(value)
+  return {
+    ingress: historyComparison(body.ingress),
+    egress: historyComparison(body.egress),
+    overlapping: body.overlapping === true,
+    state_evicted: body.state_evicted === true,
+  }
+}
+
+function lifecycleObservation(value: unknown) {
+  const body = record(value)
+  return {
+    parent_thread: digest(body.parent_thread),
+    forked_from_thread: digest(body.forked_from_thread),
+    compaction: body.compaction === true,
+    conflict: body.conflict === true,
+    metadata_incomplete: body.metadata_incomplete === true,
+  }
+}
+
+function historyComparison(value: unknown) {
+  const body = record(value)
+  const statuses = ["no_baseline", "compared", "truncated", "unavailable"]
+  const relations = [
+    "unchanged",
+    "appended",
+    "shortened",
+    "modified",
+    "representation_changed",
+  ]
+  const settings = [
+    "model",
+    "instructions",
+    "tools",
+    "reasoning",
+    "text",
+    "parallel_tool_calls",
+    "tool_choice",
+    "service_tier",
+    "prompt_cache_options",
+    "prompt_cache_retention",
+    "prompt_cache_key",
+  ]
+  return {
+    status:
+      statuses.includes(String(body.status)) ? body.status : "unavailable",
+    relation:
+      relations.includes(String(body.relation)) ? body.relation : "unknown",
+    matched_items: count(body.matched_items),
+    first_changed_item: count(body.first_changed_item),
+    first_changed_block: count(body.first_changed_block),
+    changed_settings:
+      Array.isArray(body.changed_settings) ?
+        body.changed_settings
+          .filter(
+            (field): field is string =>
+              typeof field === "string" && settings.includes(field),
+          )
+          .slice(0, settings.length)
+      : [],
+  }
+}
+
+function ordinaryInput(sample: Sample): Count {
+  return ordinaryMetrics(sample.metrics)
+}
+
+function ordinaryMetrics(metrics: Record<MetricName, Count>): Count {
+  const {
+    input_tokens: input,
+    cached_input_tokens: read,
+    cache_write_tokens: write,
+  } = metrics
+  return (
+      input !== null
+        && read !== null
+        && write !== null
+        && read <= input
+        && write <= input - read
+    ) ?
+      input - read - write
+    : null
+}
+
+function unreadInput(sample: Sample): Count {
+  const { input_tokens: input, cached_input_tokens: read } = sample.metrics
+  return input !== null && read !== null ? input - read : null
+}
+
+function latency(values: Array<Count>) {
+  const known = values
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => a - b)
+  return {
+    known_records: known.length,
+    coverage: values.length > 0 ? known.length / values.length : null,
+    median_ms:
+      known.length > 0 ?
+        (known[Math.floor((known.length - 1) / 2)]
+          + known[Math.floor(known.length / 2)])
+        / 2
+      : null,
+  }
+}
+
+function historyReport(samples: Array<Sample>) {
+  const threads = new Map<string, Array<Sample>>()
+  for (const sample of samples) {
+    if (!sample.thread || !sample.processScope || !sample.correlationScope)
+      continue
+    const key = `${sample.processScope}:${sample.correlationScope}:${sample.thread}`
+    const group = threads.get(key) ?? []
+    group.push(sample)
+    threads.set(key, group)
+  }
+  const ranked = samples
+    .map((sample, index) => ({ sample, index, unread: unreadInput(sample) }))
+    .filter(
+      (entry): entry is typeof entry & { unread: number } =>
+        entry.unread !== null,
+    )
+    .sort((a, b) => b.unread - a.unread || a.index - b.index)
+    .slice(0, 20)
+  return {
+    by_model: groupHistory(samples, "model"),
+    by_source: groupHistory(samples, "source"),
+    by_role: groupHistory(samples, "role"),
+    by_process_thread: Object.fromEntries(
+      [...threads]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, group]) => [key, summarizeHistory(group)]),
+    ),
+    correlated_records: [...threads.values()].reduce(
+      (total, group) => total + group.length,
+      0,
+    ),
+    unread_input_tokens: measure(samples.map((sample) => unreadInput(sample))),
+    ordinary_input_tokens: measure(
+      samples.map((sample) => ordinaryInput(sample)),
+    ),
+    latency: {
+      ttft: latency(samples.map((sample) => sample.ttft)),
+      duration: latency(samples.map((sample) => sample.duration)),
+    },
+    largest_unread_inputs: ranked.map(({ sample, index, unread }) => ({
+      request_id: sample.requestId ?? `record-${index + 1}`,
+      model: sample.model,
+      source: sample.source,
+      role: sample.role,
+      process_scope: sample.processScope,
+      thread_fingerprint: sample.thread,
+      input_tokens: sample.metrics.input_tokens,
+      cached_input_tokens: sample.metrics.cached_input_tokens,
+      cache_write_tokens: sample.metrics.cache_write_tokens,
+      ordinary_input_tokens: ordinaryInput(sample),
+      output_tokens: sample.metrics.output_tokens,
+      unread_input_tokens: unread,
+      history_comparison: sample.history,
+      lifecycle: sample.lifecycle,
+    })),
+    limitations: [
+      "Thread correlation requires explicit identity, correlation scope and process scope; keys and content similarity never supply identity.",
+      "Unread input includes new context. Structural comparisons and provider cache reads are different observations.",
+      "Legacy records cannot recover missing thread identities, task roles or earlier history.",
+    ],
+  }
+}
+
+function summarizeHistory(samples: Array<Sample>) {
+  const attemptOrdinary = measure(
+    samples
+      .flatMap((sample) => sample.attemptDetails)
+      .map((metrics) => ordinaryMetrics(metrics)),
+  )
+  const totalAttempts = measure(samples.map((sample) => sample.attempts))
+  const denominator =
+    totalAttempts.observed_sum === null ?
+      null
+    : Number(totalAttempts.observed_sum)
+  return {
+    ...summarize(samples),
+    ordinary_input_tokens: measure(
+      samples.map((sample) => ordinaryInput(sample)),
+    ),
+    unread_input_tokens: measure(samples.map((sample) => unreadInput(sample))),
+    attempt_ordinary_input_tokens: {
+      observed_sum: attemptOrdinary.observed_sum,
+      known_attempts: attemptOrdinary.known_records,
+      coverage:
+        (
+          totalAttempts.known_records === samples.length
+          && denominator !== null
+          && denominator > 0
+        ) ?
+          attemptOrdinary.known_records / denominator
+        : null,
+    },
+    latency: {
+      ttft: latency(samples.map((sample) => sample.ttft)),
+      duration: latency(samples.map((sample) => sample.duration)),
+    },
+  }
+}
+
+function groupHistory(
+  samples: Array<Sample>,
+  key: "model" | "source" | "role",
+) {
+  const groups = new Map<string, Array<Sample>>()
+  for (const sample of samples) {
+    const group = groups.get(sample[key]) ?? []
+    group.push(sample)
+    groups.set(sample[key], group)
+  }
+  return Object.fromEntries(
+    [...groups]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, group]) => [name, summarizeHistory(group)]),
   )
 }
 

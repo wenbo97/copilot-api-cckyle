@@ -51,6 +51,106 @@ test("time range is inclusive/exclusive and invalid metrics stay unknown", async
   expect(empty.stdout).toContain("No data")
 }, 30_000)
 
+test("conflicting replay fails without echoing private contents, identical replay keeps first time association", async () => {
+  const conflict = await fixture(
+    entry("private-request", {
+      input_tokens: 1,
+      private_field: "private-secret",
+    })
+      + entry("private-request", {
+        input_tokens: 2,
+        private_field: "private-secret",
+      }),
+  )
+  const failed = await run(conflict, "--history", "--json")
+  expect(failed.code).toBe(1)
+  expect(failed.stderr).toContain("Conflicting cache diagnostic records")
+  expect(failed.stderr).not.toContain("private-")
+  expect(failed.stdout).toBe("")
+  const repeated = await fixture(
+    entry("same", { input_tokens: 100 }, "2026-09-29T09:00:00Z")
+      + entry("same", { input_tokens: 100 }, "2026-09-29T11:00:00Z"),
+  )
+  const result = await run(
+    repeated,
+    "--since",
+    "2026-09-29T10:00:00Z",
+    "--json",
+  )
+  expect(result.code).toBe(0)
+  expect(JSON.parse(result.stdout) as unknown).toMatchObject({
+    overall: { records: 0 },
+    parsing: { duplicate_records: 1, filtered_records: 1 },
+  })
+}, 30_000)
+
+test("history reports pair counters, retain unknown legacy attribution, and scope thread groups by process", async () => {
+  const identity = {
+    schema_version: 2,
+    source: "native_responses",
+    thread_fingerprint: "a".repeat(64),
+    correlation_scope: "b".repeat(64),
+    process_scope: "00000000-0000-0000-0000-000000000001",
+    request_role: "main",
+  }
+  const file = await fixture(
+    entry("a", {
+      ...identity,
+      input_tokens: 100,
+      cached_input_tokens: 80,
+      cache_write_tokens: 10,
+      output_tokens: 2,
+      ttft_ms: 20,
+      duration_ms: 50,
+      history_comparison: {
+        egress: {
+          status: "compared",
+          relation: "modified",
+          first_changed_block: 1,
+          changed_settings: ["tools", "private-setting"],
+        },
+      },
+    })
+      + entry("b", {
+        ...identity,
+        process_scope: "00000000-0000-0000-0000-000000000002",
+        input_tokens: 300,
+        cached_input_tokens: 0,
+        cache_write_tokens: 400,
+      })
+      + entry("legacy", { input_tokens: 200, cached_input_tokens: null }),
+  )
+  const result = await run(file, "--history", "--json")
+  expect(result.code).toBe(0)
+  const report = JSON.parse(result.stdout) as {
+    history: {
+      by_process_thread: Record<string, unknown>
+      largest_unread_inputs: Array<Record<string, unknown>>
+    }
+  }
+  expect(report).toMatchObject({
+    history: {
+      correlated_records: 2,
+      ordinary_input_tokens: { observed_sum: 10, known_records: 1 },
+      unread_input_tokens: { observed_sum: 320, known_records: 2 },
+      by_role: { main: { records: 2 }, unknown: { records: 1 } },
+      latency: { ttft: { median_ms: 20 } },
+    },
+  })
+  expect(Object.keys(report.history.by_process_thread)).toHaveLength(2)
+  expect(report.history.largest_unread_inputs).toHaveLength(2)
+  expect(report.history.largest_unread_inputs[0]).toMatchObject({
+    unread_input_tokens: 300,
+    ordinary_input_tokens: null,
+  })
+  expect(report.history.largest_unread_inputs[1]).toMatchObject({
+    history_comparison: {
+      egress: { first_changed_block: 1, changed_settings: ["tools"] },
+    },
+  })
+  expect(result.stdout).not.toContain("private-setting")
+}, 30_000)
+
 test("rejects unreadable files and invalid time arguments", async () => {
   const file = await fixture("")
   for (const args of [
@@ -119,7 +219,12 @@ test.each(["utf8", "utf16le"] as const)(
   "summarizes observed usage and coverage from %s logs",
   async (encoding) => {
     const file = await fixture(
-      entry("a", { input_tokens: 999 })
+      entry("a", {
+        input_tokens: 100,
+        cached_input_tokens: 80,
+        output_tokens: 10,
+        usage_complete: true,
+      })
         + entry("a", {
           input_tokens: 100,
           cached_input_tokens: 80,

@@ -256,7 +256,11 @@ async function handleCompletionViaResponses(
     `[Anthropic→Responses] Using model: "${payload.model}" (responses bridge)`,
   )
 
-  const origin = responsesDiagnosticOrigin("messages", payload)
+  const origin = responsesDiagnosticOrigin(
+    "messages",
+    payload,
+    c.req.raw.headers,
+  )
   diagnostics.setRequestId(origin?.requestId)
   const responsesPayload = translateAnthropicToResponses(payload)
 

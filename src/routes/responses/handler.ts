@@ -8,6 +8,7 @@ import { pickEgress } from "~/lib/endpoint-router"
 import { HTTPError } from "~/lib/error"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { responsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
 import {
@@ -284,6 +285,11 @@ async function handleResponsesPassthrough(
   if (state.manualApprove) await awaitApproval()
 
   const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  requestOptions.responsesDiagnostics = responsesDiagnosticOrigin(
+    "responses",
+    payload,
+    c.req.raw.headers,
+  )
   const response = await createResponses(payload, requestOptions)
 
   if (isResponsesNonStreaming(response)) {

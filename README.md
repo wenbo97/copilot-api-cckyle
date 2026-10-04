@@ -288,8 +288,84 @@ reasoning-only frames do not count. It is `null` for non-streaming requests.
 Timing starts after request compatibility transforms, before the upstream call;
 it excludes earlier inbound handling, rate-limit waits, and manual approval.
 This observer covers Responses egress only, including Messages requests
-that use that egress. It does not provide production cross-turn history state or
-a complete per-task cost report.
+that use that egress. Thread comparisons use bounded, process-local observation
+state rather than persisted conversation storage. This is not a complete
+per-task cost report.
+
+#### Reading I/O token and cache usage
+
+With `COPILOT_CACHE_DIAGNOSTICS=1`, inspect the JSON after `[cache-diagnostics]`.
+One summary is emitted when the logical request finishes, including failures or
+cancellation; it is not a continuously updated token counter during generation.
+
+| Field                   | Meaning                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input_tokens`          | Reported input total, already including cache reads and cache writes.                                                                               |
+| `output_tokens`         | Reported output total, already including reasoning tokens.                                                                                          |
+| `cached_input_tokens`   | Reported cache-read tokens. This is the primary evidence of an input-cache hit.                                                                     |
+| `cache_write_tokens`    | Reported newly written cache tokens, counted within input rather than added to it.                                                                  |
+| `ordinary_input_tokens` | `input_tokens - cached_input_tokens - cache_write_tokens`, available only when all counters are known and form a valid partition.                   |
+| `reasoning_tokens`      | Reasoning detail within output; do not add it again to `output_tokens`.                                                                             |
+| `cache_hit_ratio`       | Single-response read ratio, `cached_input_tokens / input_tokens`; `0.99` means 99%. Unknown or zero input produces `null`.                          |
+| `usage_complete`        | Currently means only that valid input and cache-read counts are both available. It does not guarantee output, write, or reasoning counts are known. |
+| `copilot_nano_aiu`      | Optional provider metering, not a token count or independently audited account debit.                                                               |
+
+`null` means unknown, including missing or invalid measurements. An explicit
+`0` means an observed zero; do not substitute zero for missing usage.
+
+For example, one observed response reported:
+
+```json
+{
+  "input_tokens": 14224,
+  "cached_input_tokens": 14177,
+  "cache_write_tokens": 44,
+  "ordinary_input_tokens": 3,
+  "output_tokens": 16,
+  "reasoning_tokens": 0
+}
+```
+
+Its input total is `14177 + 44 + 3 = 14224` and its output total is 16.
+The read ratio is approximately 99.67%. The 47 unread input tokens include
+44 newly written tokens and 3 ordinary tokens; unread input is not automatically
+a preventable cache miss.
+
+Always check the request and attempt status alongside the counters:
+
+- `outcome` describes completion, failure, cancellation, or a missing terminal event.
+- `upstream_attempts` counts actual upstream attempts; more than one indicates
+  an internal retry.
+- Top-level usage describes the logical final response. `attempt_details[]`
+  records each attempt's own usage, cause, HTTP status, outcome, and errors.
+  To include retries, sum observed attempt counters and check their coverage.
+  Never add top-level totals to attempt totals, and keep unreported failed-attempt
+  usage unknown.
+- `diagnostics_incomplete` and `attempt_details_truncated` identify incomplete
+  observations or omitted attempt details.
+
+If cache reads drop, inspect structural and policy evidence:
+
+- `history_comparison.egress.relation` shows whether actual upstream history
+  was appended, unchanged, or otherwise changed.
+- `matched_items`, `first_changed_item`, `first_changed_block`, and
+  `changed_settings` within that comparison locate prefix or setting changes.
+- `cache_policy` shows policy handling; `attempt_details[].cache_hint_processing`
+  shows cache hints preserved, added, changed, or removed between ingress and egress.
+  `cache_policy.status=applied` alone does not prove a hit.
+
+Group observations by `model` and `source`, and use `request_role` to distinguish
+declared main, subagent, memory, compaction, prewarm, and unknown traffic.
+For thread comparisons, use `thread_fingerprint` together with `process_scope`
+and `correlation_scope`. Cache keys are not thread identifiers; fingerprints
+cannot be compared across process restarts as if they used the same HMAC key.
+Bridge credential-cache messages are separate from model input-cache usage.
+
+In the local Codex CLI 0.160.0 multi-turn verification, `resume` emitted
+thread-cumulative `turn.completed.usage`. Differences between consecutive turns
+in the same thread matched the proxy's per-request input/read/output totals.
+Do not add every turn's cumulative CLI usage; take differences or use the
+proxy's per-request diagnostics.
 
 #### Messages bridge usage
 
@@ -320,12 +396,20 @@ Client cancellation aborts the upstream without synthesizing a terminal result.
 
 #### Summarize saved diagnostics
 
+For declared-thread history comparisons and the largest unread-input contributors,
+add `--history`. See [long-session diagnostics](tests/acceptance/TOKEN-CACHE-DIAGNOSTICS.md)
+for identity sources, bounded state, privacy, and interpretation limits. Unknown
+usage remains unknown; identical log replays retain their first association and
+conflicting payloads stop analysis.
+
 From the repository directory, run:
 
 ```powershell
 bun run usage:summary
-bun run usage:summary tmps/cache-session.log --since "2026-09-29T00:00:00+08:00" --until "2026-09-30T00:00:00+08:00"
+bun run usage:summary tmps/cache-session.log --since "2026-10-03T00:00:00+08:00" --until "2026-10-04T00:00:00+08:00"
 bun run usage:summary tmps/cache-session.log --json
+bun run usage:summary tmps/cache-session.log --history
+bun run usage:summary tmps/cache-session.log --history --json
 ```
 
 The default input is `tmps/cache-session.log`. The command reads UTF-8 and
@@ -347,17 +431,34 @@ two views. Missing or truncated details lower coverage; they do not imply zero
 cost. Duplicate attempt indices contribute once, and Messages usage logs are
 not parsed as upstream billing records.
 
+Useful JSON report fields are:
+
+- `overall.metrics.<field>.observed_sum` for observed token or metering totals;
+  check that metric's `known_records` and `coverage` alongside its sum.
+- `overall.cache.hit_ratio` and `overall.cache.coverage` for token-weighted
+  cache reads and the proportion of records with paired valid input/read counters.
+  The ratio uses `sum(cached input) / sum(input)` over the same eligible records,
+  not the average of per-request percentages.
+- `overall.attempt_usage` for attempts, including retry observations and coverage.
+- `history.by_role` and `history.by_process_thread` for role and scoped-thread
+  summaries, available with `--history`.
+- `history.largest_unread_inputs` for the largest observed `input - read`
+  contributors and their structural evidence, also available with `--history`.
+
 Time filters require ISO8601 timestamps with a timezone; the interval includes
 `--since` and excludes `--until`. Without filters the whole file is analyzed.
 Records without a timestamp are counted, and excluded when a filter is active.
-Within the selected range, duplicate request IDs keep their last valid record.
+Identical request-ID replays retain their first payload and time-window
+association. Conflicting payloads stop analysis without echoing raw contents.
 Malformed summaries are skipped and counted; unrelated debug payloads are not
 included in the output. Empty results return success with unknown metrics;
 unreadable files and invalid arguments exit nonzero.
 
-JSON output has `schema_version: 1`, `scope`, `period`, `overall`, `by_model`,
-`parsing`, and `limitations`. Each metric includes `observed_sum`, `known_records`,
-and `coverage`; absent values remain `null` and actual zero remains zero.
+JSON output has `schema_version: 2`, `scope`, `period`, `overall`, `by_model`,
+`by_source`, `parsing`, and `limitations`, plus `history` when requested.
+Each final-response metric includes `observed_sum`, `known_records`, and
+`coverage`; attempt metrics use `known_attempts`. Absent values remain `null`
+and actual zero remains zero.
 Integer sums larger than JavaScript's safe integer range are decimal strings.
 
 ### Responses history rejected by Copilot
