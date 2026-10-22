@@ -11,6 +11,7 @@ import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
 import { isNullish } from "~/lib/utils"
+import { preserveStreamingRequest } from "~/routes/_shared/streaming-request"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -19,9 +20,9 @@ import {
 import { copilotRequestOptions } from "~/services/copilot/request-options"
 
 export async function handleCompletion(c: Context) {
-  await checkRateLimit(state, c.req.raw.signal)
-
   let payload = await c.req.json<ChatCompletionsPayload>()
+  preserveStreamingRequest(c.req.raw, payload)
+  await checkRateLimit(state, c.req.raw.signal)
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
   // Normalize the requested model id to a catalog id ONCE (exact id → alias →

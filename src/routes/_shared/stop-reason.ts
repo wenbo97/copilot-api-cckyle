@@ -16,9 +16,19 @@ import {
 export function deriveAnthropicStopReason(
   hasToolCall: boolean,
   response: ResponseObject,
+  hasRefusal = false,
 ): AnthropicResponse["stop_reason"] {
-  if (response.status === "completed")
+  if (response.status === "completed") {
+    const refused =
+      hasRefusal
+      || response.output.some(
+        (item) =>
+          item.type === "message"
+          && item.content.some((part) => part.type === "refusal"),
+      )
+    if (refused) return "refusal"
     return hasToolCall ? "tool_use" : "end_turn"
+  }
   if (response.status === "incomplete") {
     if (response.incomplete_details?.reason === "max_output_tokens")
       return "max_tokens"

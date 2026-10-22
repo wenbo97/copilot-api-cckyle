@@ -1,8 +1,10 @@
+import { InvalidRequestError } from "~/lib/error"
 import {
   clampReasoningEffort,
   resolveMessagesReasoningEffort,
 } from "~/routes/_shared/reasoning-policy"
 import { deriveAnthropicStopReason } from "~/routes/_shared/stop-reason"
+import { createToolNameMap, type ToolNameMap } from "~/routes/_shared/tool-name"
 import {
   anthropicToolsToResponses,
   anthropicToolChoiceToResponses,
@@ -11,6 +13,7 @@ import {
 import type {
   ResponseInputContentPart,
   ResponseInputItem,
+  ResponseToolOutputPart,
   ResponseObject,
   ResponsesPayload,
   ReasoningEffort,
@@ -20,8 +23,6 @@ import type {
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
-  AnthropicTextBlock,
-  AnthropicToolResultBlock,
 } from "./anthropic-types"
 
 import { formatMessagesUsage, readMessagesUsage } from "./usage-translation"
@@ -37,6 +38,7 @@ import { formatMessagesUsage, readMessagesUsage } from "./usage-translation"
 
 export function translateAnthropicToResponses(
   payload: AnthropicMessagesPayload,
+  toolNames: ToolNameMap = createToolNameMap(payload),
 ): ResponsesPayload {
   const effort = clampReasoningEffort(
     payload.model,
@@ -45,14 +47,14 @@ export function translateAnthropicToResponses(
 
   const result: ResponsesPayload = {
     model: payload.model,
-    input: translateMessagesToInput(payload.messages),
+    input: translateMessagesToInput(payload.messages, toolNames),
     instructions: flattenSystem(payload.system),
     stream: payload.stream,
     temperature: payload.temperature,
     top_p: payload.top_p,
     max_output_tokens: payload.max_tokens,
-    tools: anthropicToolsToResponses(payload.tools),
-    tool_choice: anthropicToolChoiceToResponses(payload.tool_choice),
+    tools: anthropicToolsToResponses(payload.tools, toolNames),
+    tool_choice: anthropicToolChoiceToResponses(payload.tool_choice, toolNames),
   }
 
   if (effort) result.reasoning = { effort }
@@ -69,6 +71,7 @@ function flattenSystem(
 
 function translateMessagesToInput(
   messages: Array<AnthropicMessage>,
+  toolNames: ToolNameMap,
 ): Array<ResponseInputItem> {
   const input: Array<ResponseInputItem> = []
 
@@ -80,8 +83,14 @@ function translateMessagesToInput(
 
     // Tool results (user turn) become standalone function_call_output items.
     // Tool uses (assistant turn) become standalone function_call items.
-    // All remaining text/image blocks collapse into one message item.
-    const contentParts: Array<ResponseInputContentPart> = []
+    // Flush each contiguous text/image run before standalone tool items.
+    let contentParts: Array<ResponseInputContentPart> = []
+    const flushContent = () => {
+      if (contentParts.length > 0) {
+        input.push({ role: message.role, content: contentParts })
+        contentParts = []
+      }
+    }
 
     for (const block of message.content) {
       switch (block.type) {
@@ -105,6 +114,7 @@ function translateMessagesToInput(
           break
         }
         case "tool_result": {
+          flushContent()
           input.push({
             type: "function_call_output",
             call_id: block.tool_use_id,
@@ -113,14 +123,15 @@ function translateMessagesToInput(
           break
         }
         case "tool_use": {
+          flushContent()
           // Responses represents a prior assistant tool call as a function_call
           // input item (mirrors what the native API echoes back).
           input.push({
             type: "function_call",
             call_id: block.id,
-            name: block.name,
+            name: toolNames.toUpstream(block.name),
             arguments: JSON.stringify(block.input),
-          } as unknown as ResponseInputItem)
+          })
           break
         }
         default: {
@@ -131,25 +142,52 @@ function translateMessagesToInput(
       }
     }
 
-    if (contentParts.length > 0) {
-      input.push({ role: message.role, content: contentParts })
-    }
+    flushContent()
   }
 
   return input
 }
 
 function stringifyToolResult(
-  content: AnthropicToolResultBlock["content"],
-): string {
+  content: unknown,
+): string | Array<ResponseToolOutputPart> {
+  if (content === undefined) return ""
   if (typeof content === "string") return content
-  // Anthropic tool_result content can be an array of blocks; concatenate any
-  // text, else JSON-encode so nothing is silently lost.
-  const text = content
-    .filter((b): b is AnthropicTextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("\n")
-  return text || JSON.stringify(content)
+  if (!Array.isArray(content)) throw unsupportedToolResult()
+  if (content.length === 0) return ""
+  return content.map((block: unknown) => {
+    if (!isRecord(block)) throw unsupportedToolResult()
+    if (block.type === "text" && typeof block.text === "string")
+      return { type: "input_text", text: block.text }
+    if (
+      block.type === "image"
+      && isRecord(block.source)
+      && block.source.type === "base64"
+      && typeof block.source.media_type === "string"
+      && ["image/gif", "image/jpeg", "image/png", "image/webp"].includes(
+        block.source.media_type,
+      )
+      && typeof block.source.data === "string"
+      && block.source.data.length > 0
+    )
+      return {
+        type: "input_image",
+        image_url: `data:${block.source.media_type};base64,${block.source.data}`,
+      }
+    throw unsupportedToolResult()
+  })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function unsupportedToolResult(): InvalidRequestError {
+  return new InvalidRequestError(
+    "Unsupported tool_result content: expected text or a supported base64 image.",
+    "unsupported_tool_result_content",
+    "messages",
+  )
 }
 
 // =============================================================================
@@ -159,6 +197,7 @@ function stringifyToolResult(
 export function translateResponsesToAnthropic(
   response: ResponseObject,
   model: string,
+  toolNames?: ToolNameMap,
 ): AnthropicResponse {
   const content: Array<AnthropicAssistantContentBlock> = []
   let hasToolCall = false
@@ -166,14 +205,17 @@ export function translateResponsesToAnthropic(
   for (const item of response.output) {
     if (item.type === "message") {
       for (const part of item.content) {
-        content.push({ type: "text", text: part.text })
+        content.push({
+          type: "text",
+          text: part.type === "refusal" ? part.refusal : part.text,
+        })
       }
     } else if (item.type === "function_call") {
       hasToolCall = true
       content.push({
         type: "tool_use",
         id: item.call_id,
-        name: item.name,
+        name: toolNames?.toOriginal(item.name) ?? item.name,
         input: safeParseArgs(item.arguments),
       })
     }

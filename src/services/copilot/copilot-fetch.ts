@@ -27,6 +27,7 @@ export async function copilotFetch(
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
     headerTimeoutMs?: number
+    disableNativeTimeout?: boolean
     onAttempt?: () => void
     observer?: CopilotFetchObserver
   } = {},
@@ -171,6 +172,7 @@ async function fetchWithHeaderTimeout(
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
     headerTimeoutMs?: number
+    disableNativeTimeout?: boolean
   },
 ): Promise<Response> {
   const timeoutMs = options.headerTimeoutMs
@@ -193,7 +195,7 @@ async function fetchWithHeaderTimeout(
     : timeoutController.signal
 
   try {
-    return await fetch(`${copilotBaseUrl(state)}${path}`, {
+    const request: RequestInit & { timeout?: false } = {
       method: options.method ?? "GET",
       headers: {
         ...copilotHeaders(state),
@@ -201,7 +203,11 @@ async function fetchWithHeaderTimeout(
       },
       ...(options.body ? { body: options.body } : {}),
       signal,
-    })
+      // Bun's independent 300s socket timer must not cap the configurable
+      // streaming phase deadlines, including explicit disabled deadlines.
+      ...(options.disableNativeTimeout ? { timeout: false as const } : {}),
+    }
+    return await fetch(`${copilotBaseUrl(state)}${path}`, request)
   } finally {
     // The header deadline must not become a body/stream deadline after fetch()
     // has resolved with response headers.

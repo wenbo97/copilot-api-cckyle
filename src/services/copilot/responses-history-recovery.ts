@@ -143,6 +143,7 @@ class HistoryRequest {
           extraHeaders: this.headers,
           signal: lifecycle?.signal ?? this.options.signal,
           headerTimeoutMs: this.options.headerTimeoutMs,
+          disableNativeTimeout: this.body.stream === true,
           onAttempt: this.options.onAttempt,
           observer: this.fetchObserver(serializedBody),
         })

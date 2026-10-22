@@ -34,6 +34,7 @@ import {
 } from "../_shared/collaboration-compat"
 import { isKnownReasoningEffort } from "../_shared/reasoning-policy"
 import { StreamItemIdNormalizer } from "../_shared/stream-item-id"
+import { preserveStreamingRequest } from "../_shared/streaming-request"
 import { validateResponsesFallback } from "./fallback-capabilities"
 import {
   translateToOpenAI,
@@ -51,9 +52,9 @@ import {
 } from "./stream-translation"
 
 export async function handleResponses(c: Context) {
-  await checkRateLimit(state, c.req.raw.signal)
-
   let payload = await c.req.json<ResponsesPayload>()
+  preserveStreamingRequest(c.req.raw, payload)
+  await checkRateLimit(state, c.req.raw.signal)
   consola.debug(
     "Responses API request payload:",
     JSON.stringify(redactCollaborationForLogging(payload)).slice(-400),

@@ -1,7 +1,10 @@
+import type { ToolNameMap } from "~/routes/_shared/tool-name"
+
 import { deriveAnthropicStopReason } from "~/routes/_shared/stop-reason"
 
 import type {
   ResponseObject,
+  ResponseOutputContent,
   ResponseStreamEvent,
 } from "../responses/responses-types"
 import type {
@@ -25,26 +28,29 @@ import {
 // =============================================================================
 
 export interface ResponsesToAnthropicStreamState {
+  toolNames?: ToolNameMap
   usage?: MessagesUsage
   terminalSeen: boolean
   messageStartSent: boolean
   model: string
   responseId: string
   nextBlockIndex: number
-  // Maps a Responses `output_index` to its Anthropic content-block bookkeeping.
-  // Reasoning items are never registered here (they consume an output_index but
-  // produce no Anthropic block).
+  // Tool blocks use output indices; visible parts use output/content index pairs.
   items: Record<
     number,
     { blockIndex: number; kind: "text" | "tool"; open: boolean }
   >
   sawToolCall: boolean
+  sawRefusal: boolean
+  textParts: Record<string, TextBlockInfo>
 }
 
 export function createResponsesToAnthropicState(
   model: string,
+  toolNames?: ToolNameMap,
 ): ResponsesToAnthropicStreamState {
   return {
+    toolNames,
     terminalSeen: false,
     messageStartSent: false,
     model,
@@ -52,6 +58,8 @@ export function createResponsesToAnthropicState(
     nextBlockIndex: 0,
     items: {},
     sawToolCall: false,
+    sawRefusal: false,
+    textParts: {},
   }
 }
 
@@ -68,6 +76,7 @@ export function translateResponsesEventToAnthropicEvents(
       state.usage,
     )
 
+  if (handleTextEvent(event, state, events)) return events
   switch (event.type) {
     case "response.created":
     case "response.in_progress": {
@@ -77,25 +86,6 @@ export function translateResponsesEventToAnthropicEvents(
 
     case "response.output_item.added": {
       handleOutputItemAdded(event, state, events)
-      break
-    }
-
-    case "response.content_part.added": {
-      // Opens the text block (if a message item was registered for this index).
-      openTextBlock(event.output_index, state, events)
-      break
-    }
-
-    case "response.output_text.delta": {
-      // Lazily open in case the backend skipped content_part.added.
-      const info = openTextBlock(event.output_index, state, events)
-      if (info) {
-        events.push({
-          type: "content_block_delta",
-          index: info.blockIndex,
-          delta: { type: "text_delta", text: event.delta },
-        })
-      }
       break
     }
 
@@ -112,6 +102,14 @@ export function translateResponsesEventToAnthropicEvents(
     }
 
     case "response.output_item.done": {
+      if (event.item.type === "message") {
+        emitMessageContent(
+          { outputIndex: event.output_index, content: event.item.content },
+          state,
+          events,
+        )
+        closeTextParts(event.output_index, state, events)
+      }
       // Close whichever block this index opened (text or tool).
       closeBlock(lookupItem(state, event.output_index), events)
       break
@@ -131,8 +129,7 @@ export function translateResponsesEventToAnthropicEvents(
       break
     }
 
-    // content_part.done / output_text.done / function_call_arguments.done carry
-    // no extra Anthropic signal (block close happens on output_item.done).
+    // Function argument snapshots carry no extra signal after their deltas.
     default: {
       break
     }
@@ -149,11 +146,13 @@ export function translateResponsesFailureToAnthropicEvents(
   state.terminalSeen = true
   const events: Array<AnthropicStreamEventData> = []
   for (const info of Object.values(state.items)) closeBlock(info, events)
+  for (const info of Object.values(state.textParts)) closeBlock(info, events)
   events.push({ type: "error", error: { type: "api_error", message } })
   return events
 }
 
 type BlockInfo = { blockIndex: number; kind: "text" | "tool"; open: boolean }
+type TextBlockInfo = BlockInfo & { text: string; closed: boolean }
 
 // Record index-access is typed as always-present but returns undefined for a
 // missing key at runtime — look up defensively.
@@ -194,17 +193,10 @@ function handleOutputItemAdded(
       content_block: {
         type: "tool_use",
         id: item.call_id ?? "",
-        name: item.name ?? "",
+        name: state.toolNames?.toOriginal(item.name ?? "") ?? item.name ?? "",
         input: {},
       },
     })
-  } else if (item.type === "message") {
-    // Register a text block; open it lazily on the first text signal.
-    state.items[outputIndex] = {
-      blockIndex: state.nextBlockIndex++,
-      kind: "text",
-      open: false,
-    }
   }
   // `reasoning` items are intentionally not registered (skipped).
 }
@@ -227,7 +219,11 @@ function emitFinish(
   }
   let stopReason: AnthropicResponse["stop_reason"]
   try {
-    stopReason = deriveAnthropicStopReason(state.sawToolCall, response)
+    stopReason = deriveAnthropicStopReason(
+      state.sawToolCall,
+      response,
+      state.sawRefusal,
+    )
   } catch (error) {
     events.push(
       ...translateResponsesFailureToAnthropicEvents(
@@ -238,11 +234,15 @@ function emitFinish(
     return
   }
   emitMessageStart(response, state, events)
+  for (const [outputIndex, item] of response.output.entries())
+    if (item.type === "message")
+      emitMessageContent({ outputIndex, content: item.content }, state, events)
   state.terminalSeen = true
   // Safety: close any still-open blocks before finishing.
   for (const info of Object.values(state.items)) {
     closeBlock(info, events)
   }
+  for (const info of Object.values(state.textParts)) closeBlock(info, events)
   events.push(
     {
       type: "message_delta",
@@ -284,15 +284,26 @@ function emitMessageStart(
   })
 }
 
-// Opens (once) the text content block registered for an output_index, returning
-// its bookkeeping. Returns undefined if no text item is registered there.
+// Text and refusal parts share a visible block keyed by both upstream indices.
+// Closed parts stay registered so repeated done snapshots cannot replay text.
 function openTextBlock(
-  outputIndex: number,
+  identity: { outputIndex: number; contentIndex: number },
   state: ResponsesToAnthropicStreamState,
   events: Array<AnthropicStreamEventData>,
-): BlockInfo | undefined {
-  const info = lookupItem(state, outputIndex)
-  if (!info || info.kind !== "text") return info
+): TextBlockInfo {
+  const key = `${identity.outputIndex}:${identity.contentIndex}`
+  let info = state.textParts[key] as TextBlockInfo | undefined
+  if (!info) {
+    info = {
+      blockIndex: state.nextBlockIndex++,
+      kind: "text",
+      open: false,
+      text: "",
+      closed: false,
+    }
+    state.textParts[key] = info
+  }
+  if (info.closed) return info
   if (!info.open) {
     info.open = true
     events.push({
@@ -302,4 +313,138 @@ function openTextBlock(
     })
   }
   return info
+}
+
+function handleTextEvent(
+  event: ResponseStreamEvent,
+  state: ResponsesToAnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): boolean {
+  switch (event.type) {
+    case "response.output_text.delta":
+    case "response.refusal.delta": {
+      if (event.type === "response.refusal.delta") state.sawRefusal = true
+      emitText(
+        {
+          outputIndex: event.output_index,
+          contentIndex: event.content_index,
+          text: event.delta,
+          snapshot: false,
+        },
+        state,
+        events,
+      )
+      return true
+    }
+    case "response.output_text.done":
+    case "response.refusal.done": {
+      if (event.type === "response.refusal.done") state.sawRefusal = true
+      emitText(
+        {
+          outputIndex: event.output_index,
+          contentIndex: event.content_index,
+          text:
+            event.type === "response.refusal.done" ? event.refusal : event.text,
+          snapshot: true,
+        },
+        state,
+        events,
+      )
+      return true
+    }
+    case "response.content_part.added":
+    case "response.content_part.done": {
+      emitContentPart(
+        {
+          outputIndex: event.output_index,
+          contentIndex: event.content_index,
+          part: event.part,
+        },
+        state,
+        events,
+      )
+      if (event.type === "response.content_part.done") {
+        const info =
+          state.textParts[`${event.output_index}:${event.content_index}`]
+        closeBlock(info, events)
+        info.closed = true
+      }
+      return true
+    }
+    default: {
+      return false
+    }
+  }
+}
+
+function emitText(
+  value: {
+    outputIndex: number
+    contentIndex: number
+    text: string
+    snapshot: boolean
+  },
+  state: ResponsesToAnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  const info = openTextBlock(value, state, events)
+  if (info.closed) return
+  let delta = value.text
+  if (value.snapshot)
+    delta =
+      value.text.startsWith(info.text) ? value.text.slice(info.text.length) : ""
+  if (!delta) return
+  info.text += delta
+  events.push({
+    type: "content_block_delta",
+    index: info.blockIndex,
+    delta: { type: "text_delta", text: delta },
+  })
+}
+
+function emitContentPart(
+  value: {
+    outputIndex: number
+    contentIndex: number
+    part: ResponseOutputContent
+  },
+  state: ResponsesToAnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  const { part } = value
+  if (part.type === "refusal") state.sawRefusal = true
+  emitText(
+    {
+      ...value,
+      text: part.type === "refusal" ? part.refusal : part.text,
+      snapshot: true,
+    },
+    state,
+    events,
+  )
+}
+
+function emitMessageContent(
+  value: { outputIndex: number; content: Array<ResponseOutputContent> },
+  state: ResponsesToAnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  for (const [contentIndex, part] of value.content.entries())
+    emitContentPart(
+      { outputIndex: value.outputIndex, contentIndex, part },
+      state,
+      events,
+    )
+}
+
+function closeTextParts(
+  outputIndex: number,
+  state: ResponsesToAnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  for (const [key, info] of Object.entries(state.textParts)) {
+    if (!key.startsWith(`${outputIndex}:`)) continue
+    closeBlock(info, events)
+    info.closed = true
+  }
 }

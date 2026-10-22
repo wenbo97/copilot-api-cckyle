@@ -15,7 +15,7 @@ export interface MatrixCase {
   model: string
   phase: Phase
   endpoint: "/responses"
-  effort: "low"
+  effort: "low" | "high"
   attempts: number
   inputTokens: number
   outputTokens: number

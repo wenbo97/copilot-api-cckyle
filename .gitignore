@@ -17,6 +17,7 @@ dist/
 
 # test scratch output (logs, traces, captured payloads)
 tests/_runlog/
+/tmp/
 
 traces/
 traces-*/

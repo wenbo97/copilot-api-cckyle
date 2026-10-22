@@ -7,7 +7,7 @@ import type {
   ResponseTool,
 } from "~/routes/responses/responses-types"
 
-import { truncateToolName } from "./tool-name"
+import { truncateToolName, type ToolNameMap } from "./tool-name"
 
 // =============================================================================
 // Shared Anthropic -> OpenAI Responses tool translation.
@@ -22,12 +22,13 @@ import { truncateToolName } from "./tool-name"
 /** Anthropic `tools` -> OpenAI Responses function tools. Empty/undefined -> undefined. */
 export function anthropicToolsToResponses(
   tools?: Array<AnthropicTool>,
+  toolNames?: ToolNameMap,
 ): Array<ResponseTool> | undefined {
   if (!tools || tools.length === 0) return undefined
   return tools.map((tool) => ({
     type: "function",
     // OpenAI rejects tool names >64 chars; Anthropic does not cap them.
-    name: truncateToolName(tool.name),
+    name: toolNames?.toUpstream(tool.name) ?? truncateToolName(tool.name),
     description: tool.description,
     parameters: tool.input_schema,
     // Responses otherwise normalizes optional Anthropic fields into strict mode.
@@ -38,6 +39,7 @@ export function anthropicToolsToResponses(
 /** Anthropic `tool_choice` -> OpenAI Responses `tool_choice`. */
 export function anthropicToolChoiceToResponses(
   tc: AnthropicMessagesPayload["tool_choice"],
+  toolNames?: ToolNameMap,
 ): ResponsesPayload["tool_choice"] {
   if (!tc) return undefined
   switch (tc.type) {
@@ -54,7 +56,10 @@ export function anthropicToolChoiceToResponses(
       // Truncate symmetrically with the tool DEFINITION name above, else a forced
       // choice on a >64-char name would reference a tool absent from the list.
       return tc.name ?
-          { type: "function", name: truncateToolName(tc.name) }
+          {
+            type: "function",
+            name: toolNames?.toUpstream(tc.name) ?? truncateToolName(tc.name),
+          }
         : "auto"
     }
     default: {

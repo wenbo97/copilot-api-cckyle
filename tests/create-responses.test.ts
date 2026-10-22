@@ -53,6 +53,22 @@ test("POSTs to the /responses endpoint", async () => {
   expect(opts.method).toBe("POST")
 })
 
+test("sets vision headers for images returned by tools", async () => {
+  await createResponses({
+    model: "gpt-5.5",
+    input: [
+      {
+        type: "function_call_output",
+        call_id: "c",
+        output: [
+          { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
+        ],
+      },
+    ],
+  })
+  expect(callArgs()[1].headers["copilot-vision-request"]).toBe("true")
+})
+
 test("forwards the payload body unchanged", async () => {
   const payload: ResponsesPayload = {
     model: "gpt-5.5",

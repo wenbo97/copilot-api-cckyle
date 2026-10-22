@@ -30,7 +30,11 @@ import { parseEvents, validateResponseEvents } from "./local-wire"
 export const ROOT = path.resolve(import.meta.dir, "../../..")
 export const ACCEPTANCE_PORT = Number(
   process.env.ACCEPTANCE_PORT
-    ?? (process.argv.includes("--e2e") || process.argv.includes("latest") ?
+    ?? ((
+      process.argv.includes("--e2e")
+      || process.argv.includes("latest")
+      || process.argv.includes("claude-proxy")
+    ) ?
       "4142"
     : "4143"),
 )
@@ -348,6 +352,10 @@ export class AcceptanceRuntime {
     }
   }
 
+  private isIndependentRound() {
+    return this.e2e?.stage === "latest" || this.e2e?.stage === "claude-proxy"
+  }
+
   async authenticate() {
     const ping = await fetch("http://127.0.0.1:18774/ping", {
       signal: AbortSignal.timeout(5000),
@@ -377,9 +385,9 @@ export class AcceptanceRuntime {
     if (endpoint.includes("enterprise")) accountType = "enterprise"
     else if (endpoint.includes("business")) accountType = "business"
     this.auth = {
-      account: this.e2e?.stage === "latest" ? "unknown" : "wenbo97",
+      account: this.isIndependentRound() ? "unknown" : "wenbo97",
       identityEvidence:
-        this.e2e?.stage === "latest" ?
+        this.isIndependentRound() ?
           "authenticated through the current VS Code Bridge; username unavailable"
         : "user-confirmed VS Code login; bridge does not expose username",
       sku: token.sku,
@@ -421,9 +429,7 @@ export class AcceptanceRuntime {
           COPILOT_CACHE_DIAGNOSTICS: "1",
           COPILOT_CACHE_NAMESPACE: "local-acceptance",
           COPILOT_HEADER_TIMEOUT_MS: this.headerTimeoutMs(),
-          COPILOT_FIRST_EVENT_TIMEOUT_MS: "30000",
-          COPILOT_STREAM_IDLE_TIMEOUT_MS: "20000",
-          COPILOT_TOTAL_TIMEOUT_MS: "120000",
+          ...this.streamTimeoutEnvironment(),
         }),
       },
     )
@@ -478,6 +484,17 @@ export class AcceptanceRuntime {
     throw new Error(
       `Isolated proxy readiness failed: ${lastStartupError}; ${this.startupDiagnostics.join("; ")}`,
     )
+  }
+
+  private streamTimeoutEnvironment() {
+    return {
+      COPILOT_FIRST_EVENT_TIMEOUT_MS:
+        this.e2e?.stage === "claude-proxy" ? "120000" : "30000",
+      COPILOT_STREAM_IDLE_TIMEOUT_MS:
+        this.e2e?.stage === "claude-proxy" ? "120000" : "20000",
+      COPILOT_TOTAL_TIMEOUT_MS:
+        this.e2e?.stage === "claude-proxy" ? "240000" : "120000",
+    }
   }
 
   private isBridgeConfirmed() {

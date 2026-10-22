@@ -65,6 +65,7 @@ export const createMessages = async (
       extraHeaders,
       signal: lifecycle?.signal ?? options.signal,
       headerTimeoutMs: options.headerTimeoutMs,
+      disableNativeTimeout: payload.stream === true,
     })
 
     if (lifecycle) return lifecycle.iterate(response)

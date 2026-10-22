@@ -132,11 +132,11 @@ Copy `.env.example` to `.env`. Fork-relevant keys:
 | -------- | ------- | ------- |
 | `MODEL_MAPPINGS` | Rewrite model IDs, `source:target` comma-separated (e.g. `claude-opus-4-8:claude-opus-4.8`). | none |
 | `VSCODE_PROXY_PORT` | Port of the Copilot Token Bridge VS Code extension. | `18774` |
-| `IDLE_TIMEOUT` | Bun server idle timeout (seconds). | `255` |
-| `COPILOT_HEADER_TIMEOUT_MS` | Responses request deadline for receiving upstream headers; `0` disables it. | `60000` |
-| `COPILOT_FIRST_EVENT_TIMEOUT_MS` | Optional Responses first upstream SSE event deadline; `0` disables it. | disabled |
-| `COPILOT_STREAM_IDLE_TIMEOUT_MS` | Optional Responses upstream SSE inactivity deadline; all SSE activity resets it. | disabled |
-| `COPILOT_TOTAL_TIMEOUT_MS` | Optional total Responses upstream stream deadline. | disabled |
+| `IDLE_TIMEOUT` | Bun server idle timeout (seconds); generation requests with `stream: true` are exempt. | `255` |
+| `COPILOT_HEADER_TIMEOUT_MS` | Generation request deadline for receiving upstream headers; `0` disables it. | `60000` |
+| `COPILOT_FIRST_EVENT_TIMEOUT_MS` | First upstream SSE event deadline after response headers; `0` disables it. | `300000` |
+| `COPILOT_STREAM_IDLE_TIMEOUT_MS` | Upstream SSE inactivity deadline; all upstream events reset it; `0` disables it. | `300000` |
+| `COPILOT_TOTAL_TIMEOUT_MS` | Optional total upstream stream deadline; `0` disables it. | disabled |
 | `TRACE_OUTPUT_FOLDER` | Where request/response traces go when `--trace` is set. | `./traces` |
 | `COPILOT_CACHE_DIAGNOSTICS` | Set to `1` or `true` for Responses cache summaries and separate Messages bridge usage diagnostics. | disabled |
 | `COPILOT_CACHE_POLICY` | `prefix-v1` enables the experimental native Responses prefix policy; `off` disables it. | `off` |
@@ -520,13 +520,34 @@ Responses egress diagnostics, not fallback requests.
 All Responses, Chat, and Messages generation routes propagate caller cancellation
 to the upstream request; closing a downstream SSE reader also aborts upstream
 work. They share `COPILOT_HEADER_TIMEOUT_MS` (60 seconds by default; `0` disables)
-and optional `COPILOT_FIRST_EVENT_TIMEOUT_MS`, `COPILOT_STREAM_IDLE_TIMEOUT_MS`,
-and `COPILOT_TOTAL_TIMEOUT_MS` (unset or `0` disables). The stream timers apply
-to streaming requests. Authentication refresh remains shared between callers.
+and `COPILOT_FIRST_EVENT_TIMEOUT_MS` / `COPILOT_STREAM_IDLE_TIMEOUT_MS` (300 seconds
+each by default). `COPILOT_TOTAL_TIMEOUT_MS` defaults to no total deadline and
+applies per upstream attempt, including a fresh attempt for history recovery. Unset
+or blank values use these defaults; `0` disables the corresponding deadline.
+Positive integer millisecond values up to 2,147,483,647 override defaults;
+invalid values warn and fall back. The stream timers apply to streaming requests.
+Streaming upstream fetches disable Bun's separate socket timer so these explicit
+deadlines, including disabled deadlines, control their lifetime.
+Reasoning, text, tool and usage events all count as upstream activity; downstream
+heartbeats do not. Authentication refresh remains shared between callers.
+
+The three generation routes disable Bun's per-request listener timeout for
+`stream: true` immediately after parsing the request, before admission waits.
+Non-streaming, management and token-counting requests keep the listener timeout.
+
+Messages tool results may omit `content` or use an empty string/array for empty
+output. In the Responses bridge, text/base64 image arrays retain their order,
+including surrounding history text; unsupported result blocks and image sources
+return local HTTP 400. Tool images set the Copilot vision header. Long tool names
+use request-scoped aliases across definitions, forced choices and history, with
+original names restored in JSON and SSE replies. Alias collisions return local
+HTTP 400; unknown upstream names are preserved.
 
 The Messages-to-Responses bridge closes open content blocks before termination.
 Output-limit truncation maps to `max_tokens`, content filtering to `refusal`, and
-successful tool calls to `tool_use`. Truncation takes precedence over tool calls.
+successful tool calls to `tool_use`. Refusal content is visible in both JSON and
+SSE replies, including mixed text/refusal blocks, without replaying done snapshots.
+Failure takes precedence over truncation, then refusal, then tool calls/end-turn.
 Failed responses, unknown truncation reasons, and missing or malformed terminal
 events produce an error instead of a successful `message_stop`. Non-streaming
 failures retain a known upstream HTTP status, otherwise 502.

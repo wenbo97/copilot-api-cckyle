@@ -2,6 +2,10 @@ import type { Phase } from "./local-budget"
 import type { E2eAuthorization } from "./local-e2e-authorization"
 import type { MatrixCase } from "./local-matrix-authorization"
 
+import {
+  readClaudeAuthorization,
+  type ClaudeProxyAuthorization,
+} from "./local-claude-authorization"
 import { resolveCodexFixtureDirectory } from "./local-client-config"
 import { E2E_PRICES, readE2eAuthorization } from "./local-e2e-authorization"
 
@@ -58,7 +62,10 @@ export interface LatestAuthorization extends Omit<E2eAuthorization, "stage"> {
   additionalAttempts: number
   additionalMinutes: number
 }
-export type ObservedAuthorization = E2eAuthorization | LatestAuthorization
+export type ObservedAuthorization =
+  | E2eAuthorization
+  | LatestAuthorization
+  | ClaudeProxyAuthorization
 
 const phases: Array<Phase> = [
   "functional",
@@ -248,6 +255,7 @@ export function readLatestAuthorization(
 export function readObservedAuthorization(
   saved: Record<string, unknown>,
 ): ObservedAuthorization | undefined {
+  if (saved.version === 6) return readClaudeAuthorization(saved)
   if (saved.version === 5) return readLatestAuthorization(saved)
   if (saved.version === 4) return readE2eAuthorization(saved)
 }

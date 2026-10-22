@@ -206,7 +206,12 @@ export interface ResponseOutputReasoning {
   encrypted_content?: string
 }
 
-export type ResponseOutputContent = ResponseOutputText
+export type ResponseOutputContent = ResponseOutputText | ResponseOutputRefusal
+
+export interface ResponseOutputRefusal {
+  type: "refusal"
+  refusal: string
+}
 
 export interface ResponseOutputText {
   type: "output_text"
@@ -330,6 +335,22 @@ export type ResponseStreamEvent =
       output_index: number
       content_index: number
       text: string
+    }
+  | {
+      type: "response.refusal.delta"
+      sequence_number?: number
+      item_id?: string
+      output_index: number
+      content_index: number
+      delta: string
+    }
+  | {
+      type: "response.refusal.done"
+      sequence_number?: number
+      item_id?: string
+      output_index: number
+      content_index: number
+      refusal: string
     }
   | {
       type: "response.function_call_arguments.delta"

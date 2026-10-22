@@ -1,5 +1,6 @@
 import type { ServerSentEventMessage } from "fetch-event-stream"
 
+import consola from "consola"
 import { events } from "fetch-event-stream"
 
 export interface CopilotStreamTimeouts {
@@ -137,25 +138,37 @@ export class CopilotStreamLifecycle {
 
 export function readCopilotStreamTimeouts(): CopilotStreamTimeouts {
   return {
-    firstEventMs: readOptionalTimeout("COPILOT_FIRST_EVENT_TIMEOUT_MS"),
-    idleMs: readOptionalTimeout("COPILOT_STREAM_IDLE_TIMEOUT_MS"),
+    firstEventMs: readOptionalTimeout(
+      "COPILOT_FIRST_EVENT_TIMEOUT_MS",
+      300_000,
+    ),
+    idleMs: readOptionalTimeout("COPILOT_STREAM_IDLE_TIMEOUT_MS", 300_000),
     totalMs: readOptionalTimeout("COPILOT_TOTAL_TIMEOUT_MS"),
   }
 }
 
 export function readCopilotHeaderTimeoutMs(): number | undefined {
-  const raw = process.env.COPILOT_HEADER_TIMEOUT_MS
-  if (raw === undefined || raw.trim() === "") return 60_000
-  if (raw.trim() === "0") return
-
-  const parsed = Number.parseInt(raw, 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000
+  return readOptionalTimeout("COPILOT_HEADER_TIMEOUT_MS", 60_000)
 }
 
-function readOptionalTimeout(name: string): number | undefined {
+function readOptionalTimeout(
+  name: string,
+  fallback?: number,
+): number | undefined {
   const raw = process.env[name]
-  if (raw === undefined || raw.trim() === "" || raw.trim() === "0") return
-
-  const parsed = Number.parseInt(raw, 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+  if (raw === undefined || raw.trim() === "") return fallback
+  const value = raw.trim()
+  if (value === "0") return
+  const parsed = Number(value)
+  if (
+    /^\d+$/.test(value)
+    && Number.isSafeInteger(parsed)
+    && parsed > 0
+    && parsed <= 2_147_483_647
+  )
+    return parsed
+  consola.warn(
+    `Invalid ${name}=${JSON.stringify(raw)}; expected 0 or an integer from 1 to 2147483647 milliseconds. Using ${fallback === undefined ? "no deadline" : `${fallback} ms`}.`,
+  )
+  return fallback
 }

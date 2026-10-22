@@ -49,7 +49,10 @@ let defaultContext: { caseId: string; phase: Phase; requestId?: string } = {
   caseId: "unassigned",
   phase: "functional",
 }
-if (e2eAuthorization?.stage === "latest")
+if (
+  e2eAuthorization?.stage === "latest"
+  || e2eAuthorization?.stage === "claude-proxy"
+)
   consola.addReporter({
     log(event) {
       const line = event.args.find(
@@ -65,6 +68,7 @@ if (e2eAuthorization?.stage === "latest")
     },
   })
 let active = 0
+let upstreamEvents = 0
 let blocked = 0
 // Observe the public admission timestamp in the test child, before translation
 // and tokenization. Final network reservations can be closer together than slots.
@@ -162,7 +166,13 @@ function prepareObservedRequest(
   const cap = e2eAuthorization?.cases[caseId]
   if (e2eAuthorization && !cap)
     throw new Error("Unassigned E2E request blocked")
-  return prepareGeneration(pathname, payload, cap)
+  return prepareGeneration(
+    pathname,
+    payload,
+    e2eAuthorization?.stage === "claude-proxy" && cap ?
+      { ...cap, profile: "claude-proxy" }
+    : cap,
+  )
 }
 
 globalThis.fetch = Object.assign(
@@ -208,6 +218,14 @@ globalThis.fetch = Object.assign(
           id: grantId,
           observation: {
             ...record(observation),
+            firstEventMs: observedLatency(
+              record(observation).firstEventMs,
+              headerDurationMs,
+            ),
+            firstTextMs: observedLatency(
+              record(observation).firstTextMs,
+              headerDurationMs,
+            ),
             upstreamSignalAborted: init.signal?.aborted ?? false,
             headerDurationMs,
             totalDurationMs: performance.now() - started,
@@ -257,6 +275,7 @@ server.fetch = async (request, env, executionCtx) => {
         return Response.json({
           pid: process.pid,
           active,
+          upstreamEvents,
           blocked,
           rss: process.memoryUsage().rss,
           accountType: state.accountType,
@@ -293,9 +312,11 @@ server.fetch = async (request, env, executionCtx) => {
   }
   const owner = request.headers.get("x-acceptance-case")
   let ingress: Json | undefined
+  let capturedBody: Json | undefined
   let tools: unknown
   if (request.method === "POST") {
     const body = record(await request.clone().json())
+    capturedBody = body
     tools = body.tools
     ingress = {
       model: body.model,
@@ -318,11 +339,29 @@ server.fetch = async (request, env, executionCtx) => {
       }
     : defaultContext
   const requestId = randomUUID()
+  if (
+    e2eAuthorization?.stage === "claude-proxy"
+    && capturedBody
+    && url.pathname.endsWith("/messages")
+  )
+    writeFileSync(
+      path.join(
+        evidenceDirectory,
+        `${selected.caseId}-${requestId}-ingress.json`,
+      ),
+      JSON.stringify(capturedBody),
+    )
   return context.run({ ...selected, ingress, requestId }, async () => {
     const response = await originalHandler(request, env, executionCtx)
     if (!isClaudeToolCase(selected.caseId)) return response
     return observeMessages(response, { requestId, tools })
   })
+}
+
+function observedLatency(afterHeaders: unknown, headers: number | undefined) {
+  return typeof afterHeaders === "number" && headers !== undefined ?
+      Math.round(afterHeaders + headers)
+    : undefined
 }
 
 function observeMessages(
@@ -331,6 +370,7 @@ function observeMessages(
 ) {
   const { requestId, tools } = capture
   const events: Array<Json> = []
+  let terminalSeen = false
   return observeBody(
     response,
     () => {
@@ -349,13 +389,17 @@ function observeMessages(
         events.length < 100
         && (event.usage
           || record(event.message).usage
-          || event.type === "message_stop")
+          || event.type === "message_delta"
+          || event.type === "error"
+          || event.type === "message_stop"
+          || terminalSeen)
       )
         events.push({
           type: event.type,
           usage: event.usage ?? record(event.message).usage,
           stopReason: record(event.delta).stop_reason,
         })
+      if (event.type === "message_stop") terminalSeen = true
     },
   )
 }
@@ -371,6 +415,9 @@ function observeUpstream(
 ) {
   const { owner, grantId, tools } = capture
   const events: Array<Json> = []
+  const started = performance.now()
+  let firstEventMs: number | undefined
+  let firstTextMs: number | undefined
   return observeBody(
     response,
     async (observation) => {
@@ -391,9 +438,13 @@ function observeUpstream(
             2,
           ),
         )
-      await finish(observation)
+      await finish({ ...observation, firstEventMs, firstTextMs })
     },
     (event) => {
+      upstreamEvents++
+      firstEventMs ??= Math.round(performance.now() - started)
+      if (event.type === "response.output_text.delta")
+        firstTextMs ??= Math.round(performance.now() - started)
       if (isClaudeToolCase(owner.caseId) && events.length < 100) {
         const projected = projectWireEvent(event)
         if (projected.usage || projected.status || projected.readCall)
@@ -405,7 +456,8 @@ function observeUpstream(
 
 function isClaudeToolCase(id: string): boolean {
   return (
-    id === "claude-tool"
+    id.startsWith("claude-proxy-")
+    || id === "claude-tool"
     || /^(?:e2e|latest)-gpt-[\d.]+-(?:luna|terra|sol|astra)(?:-fast)?-claude-[ab]$/u.test(
       id,
     )

@@ -85,6 +85,8 @@ export interface Observation {
   usage: Json | null
   protocolOutcome?: string
   transportOutcome?: string
+  firstEventMs?: number
+  firstTextMs?: number
 }
 
 interface Observed extends Observation {
@@ -256,9 +258,13 @@ export class BudgetLedger {
     this.grants.push(grant)
   }
 
+  private expectedEffort() {
+    return this.e2e?.stage === "claude-proxy" ? "high" : "low"
+  }
+
   private validateRequest(request: Reservation) {
-    if (request.effort !== "low")
-      throw new Error("Expected low reasoning effort")
+    if (request.effort !== this.expectedEffort())
+      throw new Error(`Expected ${this.expectedEffort()} reasoning effort`)
     if (!["/chat/completions", "/responses"].includes(request.endpoint))
       throw new Error("Generation endpoint is not allowed")
     const phase = Object.entries(PHASE_LIMITS).find(
@@ -521,7 +527,7 @@ function outputLimitKey(endpoint: string, body: Json): string {
 export function prepareGeneration(
   endpoint: string,
   source: Json,
-  limits = { inputTokens: 65536, outputTokens: 4096 },
+  limits: GenerationLimits = { inputTokens: 65536, outputTokens: 4096 },
 ) {
   if (!["/chat/completions", "/responses"].includes(endpoint))
     throw new Error("Unexpected generation endpoint")
@@ -532,20 +538,9 @@ export function prepareGeneration(
     endpoint === "/responses" ?
       record(body.reasoning).effort
     : body.reasoning_effort
-  if (effort !== "low")
+  if (effort !== (limits.profile === "claude-proxy" ? "high" : "low"))
     throw new Error("Egress reasoning effort must be explicitly low")
-  const key = outputLimitKey(endpoint, body)
-  const requested = body[key] ?? undefined
-  if (
-    requested !== undefined
-    && (!Number.isSafeInteger(requested) || Number(requested) <= 0)
-  )
-    throw new Error("Invalid output token limit")
-  validateGenerationLimits(limits)
-  const outputTokens = Math.min(Number(requested ?? 2048), limits.outputTokens)
-  const limitApplied =
-    requested === undefined || Number(requested) > outputTokens
-  body[key] = outputTokens
+  const { outputTokens, limitApplied } = prepareOutput(body, endpoint, limits)
   const serialized = JSON.stringify(body)
   const media = /"type":"input_(?:image|file)"|"image_url"/u.test(serialized)
   const inputTokens = media ? 65536 : encode(serialized).length * 2 + 1024
@@ -558,17 +553,50 @@ export function prepareGeneration(
   return { body, serialized, inputTokens, outputTokens, effort, limitApplied }
 }
 
-function validateGenerationLimits(limits: {
+interface GenerationLimits {
   inputTokens: number
   outputTokens: number
-}) {
+  profile?: "claude-proxy"
+}
+
+function prepareOutput(body: Json, endpoint: string, limits: GenerationLimits) {
+  const key = outputLimitKey(endpoint, body)
+  const requested = body[key] ?? undefined
+  if (
+    requested !== undefined
+    && (!Number.isSafeInteger(requested) || Number(requested) <= 0)
+  )
+    throw new Error("Invalid output token limit")
+  validateGenerationLimits(
+    limits,
+    limits.profile === "claude-proxy" ? 16384 : 4096,
+  )
+  if (
+    limits.profile === "claude-proxy"
+    && (requested === undefined || Number(requested) > limits.outputTokens)
+  )
+    throw new Error("Claude client output cap exceeds authorization")
+  const outputTokens = Math.min(Number(requested ?? 2048), limits.outputTokens)
+  const limitApplied =
+    requested === undefined || Number(requested) > outputTokens
+  body[key] = outputTokens
+  return { outputTokens, limitApplied }
+}
+
+function validateGenerationLimits(
+  limits: {
+    inputTokens: number
+    outputTokens: number
+  },
+  maximumOutput = 4096,
+) {
   if (
     !Number.isSafeInteger(limits.inputTokens)
     || limits.inputTokens <= 0
     || limits.inputTokens > 1000000
     || !Number.isSafeInteger(limits.outputTokens)
     || limits.outputTokens <= 0
-    || limits.outputTokens > 4096
+    || limits.outputTokens > maximumOutput
   )
     throw new Error("Invalid explicit request token caps")
 }

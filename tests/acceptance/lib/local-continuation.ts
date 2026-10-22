@@ -10,6 +10,7 @@ import path from "node:path"
 
 import { BudgetLedger, record, type Reservation } from "./local-budget"
 import { readCacheAuthorization } from "./local-cache-authorization"
+import { readClaudeAuthorization } from "./local-claude-authorization"
 import { readE2eAuthorization } from "./local-e2e-authorization"
 import { readLatestAuthorization } from "./local-latest-authorization"
 import { LiveTime } from "./local-live-time"
@@ -439,7 +440,8 @@ export function openBudget(input: BudgetInput) {
     const saved = record(
       JSON.parse(readFileSync(input.options.authorizationFile, "utf8")),
     )
-    if (saved.version === 5) return openLatestBudget(input, saved)
+    if (saved.version === 5 || saved.version === 6)
+      return openLatestBudget(input, saved)
   }
   return openHistoricalBudget(input)
 }
@@ -523,7 +525,10 @@ function openLatestBudget(
   input: Parameters<typeof openBudget>[0],
   saved: Record<string, unknown>,
 ) {
-  const auth = readLatestAuthorization(saved)
+  const auth =
+    saved.version === 6 ?
+      readClaudeAuthorization(saved)
+    : readLatestAuthorization(saved)
   const { directory, maxCredits, previous, options } = input
   if (
     path.resolve(directory) !== auth.budgetDirectory

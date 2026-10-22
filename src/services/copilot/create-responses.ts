@@ -269,7 +269,10 @@ function hasVisionContent(payload: ResponsesPayload): boolean {
   if (typeof payload.input === "string") return false
 
   return payload.input.some((item) => {
-    const content = (item as { content?: unknown }).content
+    const content =
+      item.type === "function_call_output" ?
+        item.output
+      : (item as { content?: unknown }).content
     return (
       Array.isArray(content)
       && content.some((part) => {

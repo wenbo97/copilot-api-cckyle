@@ -5,7 +5,6 @@ import type {
   ResponseObject,
   ResponseOutputContent,
   ResponseOutputItem,
-  ResponseOutputMessage,
 } from "./responses-types"
 
 const CHAT_FINISH_REASONS = new Set([
@@ -53,6 +52,10 @@ export class NativeResponsesStreamTracker {
   private createdResponse?: ResponseObject
   private nextSequenceNumber = 1
   private readonly outputItems = new Map<number, ResponseOutputItem>()
+  private readonly contentParts = new Map<
+    number,
+    Map<number, ResponseOutputContent>
+  >()
   private terminal = false
 
   get terminalSeen(): boolean {
@@ -87,6 +90,7 @@ export class NativeResponsesStreamTracker {
     ) {
       const outputIndex = event.output_index
       if (typeof outputIndex === "number" && isLooseOutputItem(event.item)) {
+        this.contentParts.delete(outputIndex)
         this.outputItems.set(
           outputIndex,
           cloneOutputItem(event.item as unknown as ResponseOutputItem),
@@ -95,14 +99,7 @@ export class NativeResponsesStreamTracker {
       return
     }
 
-    if (event.type === "response.output_text.delta") {
-      this.appendText(event.output_index, event.delta)
-      return
-    }
-    if (event.type === "response.output_text.done") {
-      this.setText(event.output_index, event.text)
-      return
-    }
+    if (this.observeContent(event)) return
     if (event.type === "response.function_call_arguments.delta") {
       this.appendArguments(event.output_index, event.delta)
       return
@@ -180,22 +177,82 @@ export class NativeResponsesStreamTracker {
       .map(([, item]) => cloneOutputItem(item))
   }
 
-  private appendText(outputIndex: unknown, delta: unknown): void {
-    if (typeof outputIndex !== "number" || typeof delta !== "string") return
-    const item = this.outputItems.get(outputIndex)
-    if (!item || item.type !== "message") return
-    const current = getMessageText(item)
-    this.setText(outputIndex, current + delta)
+  private observeContent(event: NativeResponsesSseEvent): boolean {
+    switch (event.type) {
+      case "response.output_text.delta":
+      case "response.output_text.done": {
+        this.updateTextPart(
+          event,
+          "output_text",
+          event.type === "response.output_text.done",
+        )
+        return true
+      }
+      case "response.refusal.delta":
+      case "response.refusal.done": {
+        this.updateTextPart(
+          event,
+          "refusal",
+          event.type === "response.refusal.done",
+        )
+        return true
+      }
+      case "response.content_part.added":
+      case "response.content_part.done": {
+        const part = event.part
+        if (!isRecord(part)) return true
+        if (part.type === "refusal")
+          this.updateTextPart(
+            { ...event, refusal: part.refusal },
+            "refusal",
+            true,
+          )
+        else if (part.type === "output_text")
+          this.updateTextPart(
+            { ...event, text: part.text },
+            "output_text",
+            true,
+          )
+        return true
+      }
+      default: {
+        return false
+      }
+    }
   }
 
-  private setText(outputIndex: unknown, text: unknown): void {
-    if (typeof outputIndex !== "number" || typeof text !== "string") return
+  private updateTextPart(
+    event: NativeResponsesSseEvent,
+    kind: "output_text" | "refusal",
+    snapshot: boolean,
+  ): void {
+    const outputIndex = event.output_index
+    const contentIndex =
+      typeof event.content_index === "number" ? event.content_index : 0
+    const value =
+      snapshot ? event[kind === "refusal" ? "refusal" : "text"] : event.delta
+    if (typeof outputIndex !== "number" || typeof value !== "string") return
     const item = this.outputItems.get(outputIndex)
     if (!item || item.type !== "message") return
-    this.outputItems.set(outputIndex, {
-      ...item,
-      content: [{ type: "output_text" as const, text, annotations: [] }],
-    })
+    const parts =
+      this.contentParts.get(outputIndex)
+      ?? new Map(item.content.map((part, index) => [index, part]))
+    this.contentParts.set(outputIndex, parts)
+    const current = parts.get(contentIndex)
+    let text = value
+    if (!snapshot && current)
+      text =
+        (current.type === "refusal" ? current.refusal : current.text) + value
+    parts.set(
+      contentIndex,
+      kind === "refusal" ?
+        { type: "refusal", refusal: text }
+      : { type: "output_text", text, annotations: [] },
+    )
+    const content = [...parts.entries()]
+      .toSorted(([left], [right]) => left - right)
+      .map(([, part]) => part)
+    this.outputItems.set(outputIndex, { ...item, content })
   }
 
   private appendArguments(outputIndex: unknown, delta: unknown): void {
@@ -281,23 +338,11 @@ function cloneOutputItem(item: ResponseOutputItem): ResponseOutputItem {
 function cloneOutputContent(
   content: ResponseOutputContent,
 ): ResponseOutputContent {
+  if (content.type === "refusal") return { ...content }
   return {
     ...content,
     annotations: content.annotations ? [...content.annotations] : [],
   }
-}
-
-function getMessageText(item: ResponseOutputMessage): string {
-  const rawContent = (item as unknown as { content?: unknown }).content
-  return (Array.isArray(rawContent) ? rawContent : [])
-    .filter(
-      (part): part is { text: string; type: "output_text" } =>
-        isRecord(part)
-        && part.type === "output_text"
-        && typeof part.text === "string",
-    )
-    .map((part) => part.text)
-    .join("")
 }
 
 function markIncompleteIfOpen(item: ResponseOutputItem): ResponseOutputItem {
@@ -351,7 +396,13 @@ function hasValidKnownResponsesShape(value: Record<string, unknown>): boolean {
     return isResponseObject(value.response)
   if (OUTPUT_ITEM_EVENTS.has(type)) return hasOutputItemShape(value)
   if (CONTENT_PART_EVENTS.has(type)) return hasContentPartShape(value)
-  if (type === "response.output_text.delta") return hasTextDeltaShape(value)
+  if (
+    type === "response.output_text.delta"
+    || type === "response.refusal.delta"
+  )
+    return hasTextDeltaShape(value)
+  if (type === "response.refusal.done")
+    return hasTextEventIdentity(value) && typeof value.refusal === "string"
   if (type === "response.output_text.done") return hasTextDoneShape(value)
   if (type === "response.function_call_arguments.delta")
     return hasArgumentsDeltaShape(value)

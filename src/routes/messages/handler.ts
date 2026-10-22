@@ -10,6 +10,8 @@ import { checkRateLimit } from "~/lib/rate-limit"
 import { responsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
+import { preserveStreamingRequest } from "~/routes/_shared/streaming-request"
+import { createToolNameMap } from "~/routes/_shared/tool-name"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -50,9 +52,9 @@ import {
 import { readMessagesUsage } from "./usage-translation"
 
 export async function handleCompletion(c: Context) {
-  await checkRateLimit(state, c.req.raw.signal)
-
   let anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  preserveStreamingRequest(c.req.raw, anthropicPayload)
+  await checkRateLimit(state, c.req.raw.signal)
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
   // Normalize the requested model id to a catalog id ONCE (exact id → alias →
@@ -252,9 +254,7 @@ async function handleCompletionViaResponses(
   payload: AnthropicMessagesPayload,
   diagnostics: MessagesUsageDiagnostics,
 ) {
-  consola.info(
-    `[Anthropic→Responses] Using model: "${payload.model}" (responses bridge)`,
-  )
+  consola.info("[Anthropic→Responses] Using model:", payload.model)
 
   const origin = responsesDiagnosticOrigin(
     "messages",
@@ -262,7 +262,8 @@ async function handleCompletionViaResponses(
     c.req.raw.headers,
   )
   diagnostics.setRequestId(origin?.requestId)
-  const responsesPayload = translateAnthropicToResponses(payload)
+  const toolNames = createToolNameMap(payload)
+  const responsesPayload = translateAnthropicToResponses(payload, toolNames)
 
   const traceTimestamp = await traceRequest({
     type: "anthropic-via-responses",
@@ -282,6 +283,7 @@ async function handleCompletionViaResponses(
     const anthropicResponse = translateResponsesToAnthropic(
       response,
       payload.model,
+      toolNames,
     )
     diagnostics.finish(readMessagesUsage(response.usage, "responses"))
     await traceResponse(
@@ -298,7 +300,10 @@ async function handleCompletionViaResponses(
   consola.debug("Streaming response via Responses bridge")
   return streamSSE(c, async (stream) => {
     stream.onAbort(requestOptions.abort)
-    const streamState = createResponsesToAnthropicState(payload.model)
+    const streamState = createResponsesToAnthropicState(
+      payload.model,
+      toolNames,
+    )
     const streamTracer = new StreamTracer(traceTimestamp)
     const fail = async (message: string) => {
       for (const event of translateResponsesFailureToAnthropicEvents(

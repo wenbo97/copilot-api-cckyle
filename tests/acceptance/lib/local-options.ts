@@ -1,10 +1,13 @@
+import { claudeOptions } from "./local-claude-authorization"
 import { E2E_LIMITS } from "./local-e2e-authorization"
 import { latestOptions } from "./local-latest-options"
 
 /** Reject ambiguous invocations before any offline work or live authentication. */
 export function validateArguments(args: Array<string>): void {
   if (args.includes("--profile")) {
-    latestOptions(args)
+    if (args[args.indexOf("--profile") + 1] === "claude-proxy")
+      claudeOptions(args)
+    else latestOptions(args)
     return
   }
   const switches = new Set([

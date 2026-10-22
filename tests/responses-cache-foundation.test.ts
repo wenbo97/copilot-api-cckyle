@@ -613,10 +613,15 @@ test.each(["messages", "responses"] as const)(
       protocol === "responses" ? 2 : 1,
     )
     expect(firstChangedInput(tools.input, appended.input)).toBe(
-      protocol === "responses" ? 9 : 7,
+      protocol === "responses" ? 9 : 8,
     )
+    expect(appended.input.slice(0, tools.input.length)).toEqual(tools.input)
+    expect(appended.input.slice(tools.input.length)).toEqual([
+      { role: "assistant", content: "private-answer" },
+      { role: "user", content: "private-next-question" },
+    ])
     expect(firstChangedInput(tools.input, branch.input)).toBe(
-      protocol === "responses" ? 8 : 6,
+      protocol === "responses" ? 8 : 5,
     )
     expect(firstChangedInput(tools.input, compacted.input)).toBe(
       protocol === "responses" ? 1 : 0,
@@ -626,6 +631,7 @@ test.each(["messages", "responses"] as const)(
       expect(tools.input[2]).toMatchObject({
         encrypted_content: "private-opaque-reasoning",
       })
+    else expectMessagesToolHistory([tools.input, branch.input])
     for (const callId of ["call-a", "call-b"])
       expect(tools.input).toContainEqual({
         type: "function_call_output",
@@ -645,6 +651,25 @@ test.each(["messages", "responses"] as const)(
     expect(JSON.stringify(fixtures)).toBe(original)
   },
 )
+
+function expectMessagesToolHistory([tools, branch]: Array<Array<unknown>>) {
+  const expected = `[
+    {"role":"user","content":"private-initial-question"}, {"role":"assistant","content":[{"type":"output_text","text":"private-before-tools"}]},
+    {"type":"function_call","call_id":"call-a","name":"read","arguments":"{\\"path\\":\\"private-a.ts\\"}"},
+    {"role":"assistant","content":[{"type":"output_text","text":"private-between-tools"}]}, {"type":"function_call","call_id":"call-b","name":"read","arguments":"{\\"path\\":\\"private-b.ts\\"}"},
+    {"role":"user","content":[{"type":"input_text","text":"private-followup"}]},
+    {"type":"function_call_output","call_id":"call-b","output":"private-result-call-b"}, {"type":"function_call_output","call_id":"call-a","output":"private-result-call-a"}
+  ]`
+  expect(tools).toEqual(JSON.parse(expected) as Array<unknown>)
+  expect(branch.slice(0, 5)).toEqual(tools.slice(0, 5))
+  expect(branch.slice(5)).toEqual([
+    ...tools.slice(6),
+    {
+      role: "user",
+      content: [{ type: "input_text", text: "private-branch-question" }],
+    },
+  ])
+}
 
 test("cancellation keeps attempt usage unknown and never retries", async () => {
   reply = (_body, signal) =>
