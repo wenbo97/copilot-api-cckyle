@@ -149,7 +149,10 @@ class HistoryRequest {
           signal: lifecycle?.signal ?? this.options.signal,
           headerTimeoutMs: this.options.headerTimeoutMs,
           disableNativeTimeout: this.body.stream === true,
-          onAttempt: this.options.onAttempt,
+          onAttempt: () => {
+            this.options.summary?.fetched()
+            this.options.onAttempt?.()
+          },
           observer: this.fetchObserver(serializedBody),
         })
         return { response, lifecycle }

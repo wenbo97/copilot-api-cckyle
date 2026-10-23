@@ -5,6 +5,7 @@ import { colors } from "consola/utils"
 import { randomUUID } from "node:crypto"
 
 import { HTTPError } from "~/lib/error"
+import { state } from "~/lib/state"
 import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
 
 export type SummaryProtocol = "messages" | "responses" | "chat"
@@ -50,13 +51,13 @@ export class RequestSummary {
   private errorDetail?: string
   private finished = false
   // Anthropic reports input / cache-read / cache-write as separate counters.
-  private readonly anthropic: {
+  private anthropic: {
     input?: number
     read?: number
     write?: number
   } = {}
 
-  readonly usage: SummaryUsage = {}
+  usage: SummaryUsage = {}
 
   constructor(ingress: SummaryProtocol, model: string) {
     this.ingress = ingress
@@ -76,7 +77,11 @@ export class RequestSummary {
     this.signal = signal
   }
 
-  /** Record one upstream attempt with the exact serialized body sent. */
+  /**
+   * Record the exact serialized body of one logical upstream attempt. State
+   * observed from an earlier attempt (usage, outcome, TTFT) is discarded so a
+   * retry reports only what the final attempt returned.
+   */
   attempt(
     egress: SummaryProtocol,
     serializedBody: string,
@@ -84,10 +89,19 @@ export class RequestSummary {
   ): void {
     this.safe(() => {
       this.egress = egress
-      this.attempts++
       this.bodyBytes = Buffer.byteLength(serializedBody, "utf8")
       this.items = items
+      this.ttftMs = undefined
+      this.outcome = undefined
+      this.errorDetail = undefined
+      this.anthropic = {}
+      this.usage = {}
     })
+  }
+
+  /** Count one real HTTP fetch (pass as `copilotFetch`'s `onAttempt`). */
+  readonly fetched = (): void => {
+    this.attempts++
   }
 
   /** Observe one parsed upstream value (non-stream body or SSE event data). */
@@ -142,6 +156,7 @@ export class RequestSummary {
         model: this.model,
         route: routeLabel(this.ingress, this.egress),
         usage: this.usage,
+        contextLimit: promptLimit(this.model),
         ttftMs: this.ttftMs,
         durationMs: performance.now() - this.started,
         bodyBytes: this.bodyBytes,
@@ -195,8 +210,12 @@ export class RequestSummary {
         break
       }
       case "content_block_delta": {
-        const delta = record(body.delta).type
-        if (delta === "text_delta" || delta === "input_json_delta") this.ttft()
+        const delta = record(body.delta)
+        if (
+          (delta.type === "text_delta" && nonEmpty(delta.text))
+          || (delta.type === "input_json_delta" && nonEmpty(delta.partial_json))
+        )
+          this.ttft()
 
         break
       }
@@ -220,13 +239,14 @@ export class RequestSummary {
     if (read !== undefined) this.anthropic.read = read
     if (write !== undefined) this.anthropic.write = write
     if (output !== undefined) this.usage.output = output
-    const { input: base } = this.anthropic
+    const { input: base, read: cacheRead, write: created } = this.anthropic
     if (base === undefined) return
-    // Anthropic omits the cache counters when caching is not involved.
-    const cached = this.anthropic.read ?? 0
-    const created = this.anthropic.write ?? 0
-    this.usage.totalInput = base + cached + created
-    this.usage.cachedInput = cached
+    this.usage.totalInput = base + (cacheRead ?? 0) + (created ?? 0)
+    // Without any cache counter the cached share is unknown, not zero.
+    this.usage.cachedInput =
+      cacheRead === undefined && created === undefined ?
+        undefined
+      : (cacheRead ?? 0)
     this.usage.cacheWrite = created
   }
 
@@ -236,18 +256,23 @@ export class RequestSummary {
       const choice = record(raw)
       // Only streamed deltas mark first-token time; a full message does not.
       const delta = record(choice.delta)
+      const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : []
       if (
-        (typeof delta.content === "string" && delta.content.length > 0)
-        || (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0)
+        nonEmpty(delta.content)
+        || toolCalls.some((call) =>
+          nonEmpty(record(record(call).function).arguments),
+        )
       )
         this.ttft()
       if (choice.finish_reason) this.outcome = "completed"
     }
     const usage = record(body.usage)
     if (Object.keys(usage).length === 0) return
+    const prompt = record(usage.prompt_tokens_details)
     this.setOpenAIUsage({
       total: count(usage.prompt_tokens),
-      cached: count(record(usage.prompt_tokens_details).cached_tokens),
+      cached: count(prompt.cached_tokens),
+      write: count(prompt.cache_write_tokens),
       output: count(usage.completion_tokens),
       reasoning: count(
         record(usage.completion_tokens_details).reasoning_tokens,
@@ -285,9 +310,11 @@ export class RequestSummary {
       this.errorDetail = upstreamErrorText(response.error)
     const usage = record(response.usage)
     if (Object.keys(usage).length === 0) return
+    const input = record(usage.input_tokens_details)
     this.setOpenAIUsage({
       total: count(usage.input_tokens),
-      cached: count(record(usage.input_tokens_details).cached_tokens),
+      cached: count(input.cached_tokens),
+      write: count(input.cache_write_tokens),
       output: count(usage.output_tokens),
       reasoning: count(record(usage.output_tokens_details).reasoning_tokens),
     })
@@ -296,10 +323,12 @@ export class RequestSummary {
   private setOpenAIUsage(usage: {
     total?: number
     cached?: number
+    write?: number
     output?: number
     reasoning?: number
   }): void {
     this.usage.totalInput = usage.total
+    this.usage.cacheWrite = usage.write
     // A cached count above the total is not a credible observation.
     this.usage.cachedInput =
       (
@@ -331,6 +360,8 @@ export interface SummaryLine {
   model: string
   route: string
   usage: SummaryUsage
+  /** Upstream input cap for the model (catalog `max_prompt_tokens`). */
+  contextLimit?: number
   ttftMs?: number
   durationMs: number
   bodyBytes?: number
@@ -354,6 +385,8 @@ export function formatSummary(line: SummaryLine): string {
   parts.push(input)
   if (usage.cacheWrite !== undefined && usage.cacheWrite > 0)
     parts.push(`write ${integer(usage.cacheWrite)}`)
+  const context = contextUsage(usage.totalInput, line.contextLimit)
+  if (context) parts.push(context)
   let output = `out ${integer(usage.output)}`
   if (usage.reasoning !== undefined)
     output += ` (reasoning ${integer(usage.reasoning)})`
@@ -381,6 +414,26 @@ export function hitRatio(
 ): number | undefined {
   if (total === undefined || cached === undefined || total === 0) return
   return Math.floor((cached * 1000) / total) / 10
+}
+
+/** `ctx used/limit pct` — shown only when both sides are known. */
+function contextUsage(
+  used: number | undefined,
+  limit: number | undefined,
+): string | undefined {
+  if (used === undefined || limit === undefined || limit === 0) return
+  const pct = Math.floor((used * 1000) / limit) / 10
+  const text = `${pct.toFixed(1)}%`
+  let colored = colors.green(text)
+  if (pct >= 85) colored = colors.red(text)
+  else if (pct >= 60) colored = colors.yellow(text)
+  return `ctx ${integer(used)}/${integer(limit)} ${colored}`
+}
+
+function promptLimit(model: string): number | undefined {
+  const limits = state.models?.data.find((m) => m.id === model)?.capabilities
+    .limits
+  return limits?.max_prompt_tokens ?? limits?.max_context_window_tokens
 }
 
 function colorRatio(ratio: number, text: string): string {
@@ -435,6 +488,10 @@ function truncate(text: string): string {
 
 function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError"
+}
+
+function nonEmpty(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0
 }
 
 function count(value: unknown): number | undefined {

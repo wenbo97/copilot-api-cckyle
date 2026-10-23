@@ -220,7 +220,7 @@ Every upstream request logs one compact line, independent of `--verbose` and
 `COPILOT_CACHE_DIAGNOSTICS`:
 
 ```
-✔ gpt-6.1-sol  messages→responses  in 400,445 (cached 400,032 · 99.8%)  out 130 (reasoning 0)  ttft 8.98s  total 10.12s  1.70MB/966 items  completed  #98db3510
+✔ gpt-6.1-sol  messages→responses  in 400,445 (cached 400,032 · 99.8%)  ctx 400,445/922,000 43.4%  out 130 (reasoning 0)  ttft 8.98s  total 10.12s  1.70MB/966 items  completed  #98db3510
 ```
 
 Numbers are copied from upstream usage. Unknown values print `?`, never `0`.
@@ -228,7 +228,17 @@ The hit percentage is `cached / input`, truncated to one decimal place. It is
 colour-coded: green at 80% or more, yellow at 30% or more, red below. For
 native Anthropic `/v1/messages`, input is `input_tokens +
 cache_read_input_tokens + cache_creation_input_tokens`. A `write N` segment
-shows cache-creation tokens when there are any. Body size is the exact
+shows cache-write tokens when there are any (Anthropic
+`cache_creation_input_tokens`, Responses/Chat `cache_write_tokens`). When a
+request is retried, the line reports only the final attempt's usage and
+outcome, and `attempts N` counts every real upstream fetch, including
+token-refresh retries. `ctx used/limit` compares the
+request's input tokens with the model's upstream input limit from the Copilot
+`/models` catalog (`max_prompt_tokens`, falling back to
+`max_context_window_tokens`). It is truncated to one decimal place and is
+yellow at 60% or more and red at 85% or more. It is omitted when either side
+is unknown. Use it to tune Claude Code's `autoCompactWindow` below the real
+limit. Body size is the exact
 serialized egress body; `items` counts messages or input items. Failed,
 cancelled and incomplete requests print as warnings with an outcome or error
 code.

@@ -64,6 +64,7 @@ export const createMessages = async (
       signal: lifecycle?.signal ?? options.signal,
       headerTimeoutMs: options.headerTimeoutMs,
       disableNativeTimeout: payload.stream === true,
+      onAttempt: summary?.fetched,
     })
 
     if (lifecycle) return summarizeStream(summary, lifecycle.iterate(response))

@@ -46,6 +46,7 @@ export const createChatCompletions = async (
       signal: streamLifecycle?.signal ?? options.signal,
       headerTimeoutMs: options.headerTimeoutMs,
       disableNativeTimeout: payload.stream === true,
+      onAttempt: summary?.fetched,
     })
 
     if (streamLifecycle)
