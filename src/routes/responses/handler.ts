@@ -4,10 +4,12 @@ import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { debugJson } from "~/lib/debug-log"
 import { pickEgress } from "~/lib/endpoint-router"
 import { HTTPError } from "~/lib/error"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { RequestSummary } from "~/lib/request-summary"
 import { responsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
@@ -55,9 +57,10 @@ export async function handleResponses(c: Context) {
   let payload = await c.req.json<ResponsesPayload>()
   preserveStreamingRequest(c.req.raw, payload)
   await checkRateLimit(state, c.req.raw.signal)
-  consola.debug(
+  debugJson(
     "Responses API request payload:",
-    JSON.stringify(redactCollaborationForLogging(payload)).slice(-400),
+    () => redactCollaborationForLogging(payload),
+    400,
   )
 
   // Normalize the requested model id to a catalog id ONCE (exact id → alias →
@@ -107,20 +110,23 @@ async function handleResponsesFallback(c: Context, payload: ResponsesPayload) {
   })
 
   const openAIPayload = translateToOpenAI(payload)
-  consola.debug(
-    "Translated OpenAI request payload:",
-    JSON.stringify(redactCollaborationForLogging(openAIPayload)),
+  debugJson("Translated OpenAI request payload:", () =>
+    redactCollaborationForLogging(openAIPayload),
   )
 
   if (state.manualApprove) await awaitApproval()
 
-  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const requestOptions = copilotRequestOptions(
+    c.req.raw.signal,
+    new RequestSummary("responses", payload.model),
+  )
   const response = await createChatCompletions(openAIPayload, requestOptions)
 
   if (isNonStreaming(response)) {
-    consola.debug(
+    debugJson(
       "Non-streaming response from Copilot:",
-      JSON.stringify(redactCollaborationForLogging(response)).slice(-400),
+      () => redactCollaborationForLogging(response),
+      400,
     )
     const responsesResponse = translateToResponses(response, payload.metadata)
     await traceResponse(
@@ -174,9 +180,8 @@ function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
     try {
       for await (const rawEvent of response) {
         if (requestOptions.signal.aborted) break
-        consola.debug(
-          "Copilot raw stream event:",
-          JSON.stringify(redactCollaborationForLogging(rawEvent)),
+        debugJson("Copilot raw stream event:", () =>
+          redactCollaborationForLogging(rawEvent),
         )
         if (rawEvent.data === "[DONE]") {
           endedWithDone = true
@@ -191,9 +196,8 @@ function streamChatFallback(c: Context, context: ChatFallbackStreamContext) {
         )
 
         for (const event of translatedEvents) {
-          consola.debug(
-            "Translated Responses event:",
-            JSON.stringify(redactCollaborationForLogging(event)),
+          debugJson("Translated Responses event:", () =>
+            redactCollaborationForLogging(event),
           )
           streamTracer.addChunk(
             redactCollaborationForLogging({ openai: chunk, responses: event }),
@@ -285,7 +289,10 @@ async function handleResponsesPassthrough(
 
   if (state.manualApprove) await awaitApproval()
 
-  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const requestOptions = copilotRequestOptions(
+    c.req.raw.signal,
+    new RequestSummary("responses", payload.model),
+  )
   requestOptions.responsesDiagnostics = responsesDiagnosticOrigin(
     "responses",
     payload,
@@ -295,9 +302,10 @@ async function handleResponsesPassthrough(
 
   if (isResponsesNonStreaming(response)) {
     const restored = restoreCollaborationForCodex(response)
-    consola.debug(
+    debugJson(
       "Non-streaming passthrough response from Copilot:",
-      JSON.stringify(redactCollaborationForLogging(restored)).slice(-400),
+      () => redactCollaborationForLogging(restored),
+      400,
     )
     await traceResponse(
       redactCollaborationForLogging({
@@ -333,9 +341,8 @@ async function handleResponsesPassthrough(
         const restored = restoreCollaborationForCodex(
           parseNativeResponsesSseData(rawEvent.data),
         )
-        consola.debug(
-          "Copilot raw responses event:",
-          JSON.stringify(redactCollaborationForLogging(restored)),
+        debugJson("Copilot raw responses event:", () =>
+          redactCollaborationForLogging(restored),
         )
         const fixed = normalizer.normalize(restored)
         tracker.observe(fixed)

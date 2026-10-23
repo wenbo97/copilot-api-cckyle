@@ -383,7 +383,7 @@ export class ResponsesDiagnostics {
       this.request.history_state = historyTracker.statistics()
     })
     this.passive(() =>
-      consola.info(
+      consola.debug(
         `[cache-diagnostics] ${JSON.stringify({
           ...this.request,
           request_id: this.requestId,

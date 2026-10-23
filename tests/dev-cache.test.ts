@@ -44,7 +44,8 @@ consola.error(new Error("error marker"))
 console.log("http access marker")
 console.debug("console debug marker")
 consola.info("\\u001b[31mcolor marker\\u001b[0m")
-consola.info('[cache-diagnostics] {"cached_input_tokens":42}')
+consola.debug('[cache-diagnostics] {"cached_input_tokens":42}')
+consola.success("summary marker 99.8%")
 const { server } = await import(${JSON.stringify(serverModule)})
 await server.request("http://localhost/")
 process.exit(${exitCode})
@@ -73,12 +74,13 @@ test("keeps normal logs on console and appends debug only to the file", async ()
       "warning marker",
       "error marker",
       "http access marker",
-      "[cache-diagnostics]",
+      "summary marker 99.8%",
       "<-- GET /",
     ])
       expect(result.output).toContain(marker)
     expect(result.output).not.toContain("debug Unicode \u2603")
     expect(result.output).not.toContain("console debug marker")
+    expect(result.output).not.toContain("[cache-diagnostics]")
   }
   const log = readFileSync(join(directory, "tmps/cache-session.log"), "utf8")
   expect(log.match(/info Unicode \u2603/g)).toHaveLength(2)
@@ -90,6 +92,7 @@ test("keeps normal logs on console and appends debug only to the file", async ()
   expect(log).not.toContain("\u001b")
   expect(log).toContain("<-- GET /")
   expect(log).toContain("--> GET / 200")
+  expect(log).toContain("summary marker 99.8%")
   expect(log).toContain('[cache-diagnostics] {"cached_input_tokens":42}')
 })
 

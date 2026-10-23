@@ -1,4 +1,4 @@
-import consola from "consola"
+import consola, { LogLevels } from "consola"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { createHash, randomUUID } from "node:crypto"
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
@@ -38,6 +38,8 @@ if (!controlUrl || !secret || !directory)
 const controllerUrl = controlUrl
 const evidenceDirectory = directory
 const controllerSecret = secret
+// Cache diagnostics are emitted at debug level; the harness scrapes them.
+consola.level = LogLevels.debug
 const originalFetch = globalThis.fetch
 const context = new AsyncLocalStorage<{
   caseId: string

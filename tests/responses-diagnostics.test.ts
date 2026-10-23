@@ -21,15 +21,15 @@ import { createResponses } from "~/services/copilot/create-responses"
 const originalFetch = globalThis.fetch
 const originalEnv = process.env.COPILOT_CACHE_DIAGNOSTICS
 const originalState = { ...state }
-let info: ReturnType<typeof captureInfo>
+let info: ReturnType<typeof captureDiagnostics>
 const silentLog = Object.assign(() => undefined, { raw: () => undefined })
 
-function captureInfo() {
-  return spyOn(consola, "info").mockImplementation(silentLog)
+function captureDiagnostics() {
+  return spyOn(consola, "debug").mockImplementation(silentLog)
 }
 
 beforeEach(() => {
-  info = captureInfo()
+  info = captureDiagnostics()
   process.env.COPILOT_CACHE_DIAGNOSTICS = "1"
   state.copilotToken = "offline-credential-must-not-be-logged"
   state.copilotTokenExpiresAt = Math.floor(Date.now() / 1000) + 3600

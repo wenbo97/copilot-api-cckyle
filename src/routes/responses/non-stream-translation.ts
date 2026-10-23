@@ -12,6 +12,7 @@ import type {
   ResponseInputFunctionCall,
   ResponseInputFunctionCallOutput,
   ResponseInputItem,
+  ResponseInputMessage,
   ResponseObject,
   ResponseOutputFunctionCall,
   ResponseOutputItem,
@@ -116,7 +117,7 @@ function translateInputToMessages(
       })
     } else if (hasContent(item)) {
       pendingCalls = undefined
-      const msg = item
+      const msg = item as ResponseInputMessage
       // The wire shape is looser than the union: Codex's `agent_message` items
       // (sub-agent / skill turns) carry no `role` at all. Emitting
       // `role: undefined` makes backends reject the request ("One or more of the

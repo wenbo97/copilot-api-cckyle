@@ -4,6 +4,11 @@ import type {
 } from "~/routes/messages/anthropic-types"
 
 import {
+  summarizeFailure,
+  summarizeJson,
+  summarizeStream,
+} from "~/lib/request-summary"
+import {
   clampReasoningEffort,
   resolveMessagesReasoningEffort,
 } from "~/routes/_shared/reasoning-policy"
@@ -41,40 +46,49 @@ export const createMessages = async (
   headers: CreateMessagesHeaders = {},
   options: CopilotRequestOptions = {},
 ) => {
-  const enableVision = hasVisionContent(payload)
-  const isAgentCall = hasAgentMessages(payload)
   const body = adaptThinkingForCopilot(payload)
-
-  const extraHeaders: Record<string, string> = {
-    "X-Initiator": isAgentCall ? "agent" : "user",
-    "anthropic-version": headers.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
-  }
-  if (headers.anthropicBeta) {
-    extraHeaders["anthropic-beta"] = headers.anthropicBeta
-  }
-  if (enableVision) extraHeaders["copilot-vision-request"] = "true"
+  const extraHeaders = buildMessagesHeaders(payload, headers)
 
   const lifecycle =
     payload.stream ?
       new CopilotStreamLifecycle(options.signal, options.streamTimeouts)
     : undefined
+  const summary = options.summary
   try {
+    const serializedBody = JSON.stringify(body)
+    summary?.attempt("messages", serializedBody, payload.messages.length)
     const response = await copilotFetch("/v1/messages", {
       method: "POST",
-      body: JSON.stringify(body),
+      body: serializedBody,
       extraHeaders,
       signal: lifecycle?.signal ?? options.signal,
       headerTimeoutMs: options.headerTimeoutMs,
       disableNativeTimeout: payload.stream === true,
     })
 
-    if (lifecycle) return lifecycle.iterate(response)
+    if (lifecycle) return summarizeStream(summary, lifecycle.iterate(response))
 
-    return (await response.json()) as AnthropicResponse
+    return summarizeJson(summary, (await response.json()) as AnthropicResponse)
   } catch (error) {
     lifecycle?.dispose(error)
+    summarizeFailure(summary, error)
     throw error
   }
+}
+
+function buildMessagesHeaders(
+  payload: AnthropicMessagesPayload,
+  headers: CreateMessagesHeaders,
+): Record<string, string> {
+  const extraHeaders: Record<string, string> = {
+    "X-Initiator": hasAgentMessages(payload) ? "agent" : "user",
+    "anthropic-version": headers.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION,
+  }
+  if (headers.anthropicBeta) {
+    extraHeaders["anthropic-beta"] = headers.anthropicBeta
+  }
+  if (hasVisionContent(payload)) extraHeaders["copilot-vision-request"] = "true"
+  return extraHeaders
 }
 
 /**

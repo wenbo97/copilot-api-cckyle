@@ -6,7 +6,11 @@ import { join } from "node:path"
 import { state, type State } from "~/lib/state"
 import { server } from "~/server"
 
-import { captureInfo, captureLogs, completed } from "./fixtures/responses-cache"
+import {
+  captureDiagnostics,
+  captureLogs,
+  completed,
+} from "./fixtures/responses-cache"
 
 const originalFetch = globalThis.fetch
 const environment = [
@@ -16,7 +20,7 @@ const environment = [
 ]
 let previousState: State
 let previousEnvironment: Array<string | undefined>
-let info: ReturnType<typeof captureInfo>
+let info: ReturnType<typeof captureDiagnostics>
 let directory: string
 const sent: Array<string> = []
 
@@ -26,7 +30,7 @@ beforeEach(async () => {
   process.env.COPILOT_CACHE_POLICY = "off"
   delete process.env.COPILOT_CACHE_NAMESPACE
   directory = await mkdtemp(join(tmpdir(), "messages-ingress-diagnostics-"))
-  info = captureInfo()
+  info = captureDiagnostics()
   sent.length = 0
   Object.assign(state, {
     copilotToken: "synthetic-offline-token",

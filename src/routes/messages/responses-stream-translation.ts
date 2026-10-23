@@ -12,6 +12,7 @@ import type {
   AnthropicStreamEventData,
 } from "./anthropic-types"
 
+import { encodeBridgeReasoning } from "./bridge-reasoning"
 import {
   formatMessagesUsage,
   readMessagesUsage,
@@ -102,6 +103,10 @@ export function translateResponsesEventToAnthropicEvents(
     }
 
     case "response.output_item.done": {
+      if (event.item.type === "reasoning") {
+        emitReasoning(event.item, state, events)
+        break
+      }
       if (event.item.type === "message") {
         emitMessageContent(
           { outputIndex: event.output_index, content: event.item.content },
@@ -198,7 +203,26 @@ function handleOutputItemAdded(
       },
     })
   }
-  // `reasoning` items are intentionally not registered (skipped).
+  // `reasoning` items are emitted whole on output_item.done (emitReasoning).
+}
+
+// Encrypted reasoning arrives complete, so it becomes a self-contained block.
+function emitReasoning(
+  item: { id?: string; encrypted_content?: string | null },
+  state: ResponsesToAnthropicStreamState,
+  events: Array<AnthropicStreamEventData>,
+): void {
+  const data = encodeBridgeReasoning(item)
+  if (!data) return
+  const index = state.nextBlockIndex++
+  events.push(
+    {
+      type: "content_block_start",
+      index,
+      content_block: { type: "redacted_thinking", data },
+    },
+    { type: "content_block_stop", index },
+  )
 }
 
 function emitFinish(

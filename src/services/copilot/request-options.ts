@@ -1,3 +1,4 @@
+import type { RequestSummary } from "~/lib/request-summary"
 import type { ResponsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 
 import {
@@ -8,6 +9,7 @@ import {
 
 export interface CopilotRequestOptions {
   responsesDiagnostics?: ResponsesDiagnosticOrigin
+  summary?: RequestSummary
   signal?: AbortSignal
   headerTimeoutMs?: number
   streamTimeouts?: CopilotStreamTimeouts
@@ -20,9 +22,10 @@ export interface CopilotRequestScope extends CopilotRequestOptions {
 
 export function copilotRequestOptions(
   signal: AbortSignal,
+  summary?: RequestSummary,
 ): CopilotRequestScope {
   const downstream = new AbortController()
-  return {
+  const scope: CopilotRequestScope = {
     signal: AbortSignal.any([signal, downstream.signal]),
     abort: () =>
       downstream.abort(
@@ -30,5 +33,8 @@ export function copilotRequestOptions(
       ),
     headerTimeoutMs: readCopilotHeaderTimeoutMs(),
     streamTimeouts: readCopilotStreamTimeouts(),
+    ...(summary ? { summary } : {}),
   }
+  summary?.bind(scope.signal)
+  return scope
 }

@@ -64,6 +64,11 @@ export interface AnthropicThinkingBlock {
   thinking: string
 }
 
+export interface AnthropicRedactedThinkingBlock {
+  type: "redacted_thinking"
+  data: string
+}
+
 export type AnthropicUserContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
@@ -73,6 +78,7 @@ export type AnthropicAssistantContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
   | AnthropicThinkingBlock
+  | AnthropicRedactedThinkingBlock
 
 export interface AnthropicUserMessage {
   role: "user"
@@ -141,6 +147,7 @@ export interface AnthropicContentBlockStartEvent {
         input: Record<string, unknown>
       })
     | { type: "thinking"; thinking: string }
+    | AnthropicRedactedThinkingBlock
 }
 
 export interface AnthropicContentBlockDeltaEvent {

@@ -138,9 +138,12 @@ Copy `.env.example` to `.env`. Fork-relevant keys:
 | `COPILOT_STREAM_IDLE_TIMEOUT_MS` | Upstream SSE inactivity deadline; all upstream events reset it; `0` disables it. | `300000` |
 | `COPILOT_TOTAL_TIMEOUT_MS` | Optional total upstream stream deadline; `0` disables it. | disabled |
 | `TRACE_OUTPUT_FOLDER` | Where request/response traces go when `--trace` is set. | `./traces` |
-| `COPILOT_CACHE_DIAGNOSTICS` | Set to `1` or `true` for Responses cache summaries and separate Messages bridge usage diagnostics. | disabled |
+| `COPILOT_CACHE_DIAGNOSTICS` | Set to `1` or `true` for debug-level JSON Responses cache summaries and Messages usage diagnostics (bridges and native passthrough). | disabled |
 | `COPILOT_CACHE_POLICY` | `prefix-v1` enables the experimental native Responses prefix policy; `off` disables it. | `off` |
 | `COPILOT_CACHE_NAMESPACE` | Stable per-account/workspace scope used only to generate a missing cache key. | none |
+| `COPILOT_BRIDGE_CACHE_KEY` | Sends a per-session `prompt_cache_key` (SHA-256 of namespace, model and Claude Code session id; no raw ids) on the Messages→Responses bridge so a session's turns share upstream cache routing. A client-supplied key always wins. Set to `0`, `false` or `off` to disable. | enabled |
+| `COPILOT_BRIDGE_REASONING` | Carries Copilot's encrypted reasoning through Claude Code as opaque `redacted_thinking` blocks and replays it on the next Messages→Responses request, so GPT models keep their chain of thought across tool steps. Blocks are stripped if the session switches to a Claude or chat-only model. Set to `0`, `false` or `off` to disable. | enabled |
+| `COPILOT_BRIDGE_STABLE_TOOLS` | Drops Claude Code's transient `WaitForMcpServers` tool (present only while MCP servers are still connecting) on the Messages→Responses bridge, so the tool list — the front of the cached prompt prefix — stays identical across a fresh session's first requests. Set to `0`, `false` or `off` to disable. | enabled |
 
 `MODEL_MAPPINGS` example (maps the IDs Claude Code sends to internal Copilot model names):
 
@@ -211,11 +214,32 @@ pad prompts to reach a caching threshold. The cache policy introduces no retries
 and never replays a request with cache parameters removed after a rejection.
 Set `COPILOT_CACHE_POLICY=off` to roll back.
 
+### Request summary
+
+Every upstream request logs one compact line, independent of `--verbose` and
+`COPILOT_CACHE_DIAGNOSTICS`:
+
+```
+✔ gpt-6.1-sol  messages→responses  in 400,445 (cached 400,032 · 99.8%)  out 130 (reasoning 0)  ttft 8.98s  total 10.12s  1.70MB/966 items  completed  #98db3510
+```
+
+Numbers are copied from upstream usage. Unknown values print `?`, never `0`.
+The hit percentage is `cached / input`, truncated to one decimal place. It is
+colour-coded: green at 80% or more, yellow at 30% or more, red below. For
+native Anthropic `/v1/messages`, input is `input_tokens +
+cache_read_input_tokens + cache_creation_input_tokens`. A `write N` segment
+shows cache-creation tokens when there are any. Body size is the exact
+serialized egress body; `items` counts messages or input items. Failed,
+cancelled and incomplete requests print as warnings with an outcome or error
+code.
+
 ### Passive cache measurements
 
 Set `COPILOT_CACHE_DIAGNOSTICS=1` when starting the proxy to emit one
 `[cache-diagnostics]` JSON summary per logical `/responses` egress request,
-including Messages-to-Responses bridges. This makes
+including Messages-to-Responses bridges. These JSON records are logged at debug
+level. They appear on the console only with `--verbose`; `bun run dev:cache`
+always writes them to its log file. This makes
 no additional model requests and does not require `--trace`. The summary
 contains upstream attempts, input/output tokens, cache reads/writes when
 reported, Copilot-reported nano-AIU, request body size, and latency. Missing
@@ -556,9 +580,9 @@ Type checking includes source, tests, scripts, and root configuration files; loc
 `dist`, `tmps`, and test run logs are outside the project input set.
 
 For development, `bun run dev:cache` uses `scripts/dev-cache.ts` to start the
-same enterprise server as `dev`. Normal application logs and enabled cache
-summaries appear both on the console and in `tmps/cache-session.log`; debug
-messages go only to the file. Debug messages can include request/response
+same enterprise server as `dev`. Normal application logs and per-request
+summary lines appear both on the console and in `tmps/cache-session.log`; debug
+messages, including enabled `[cache-diagnostics]` JSON, go only to the file. Debug messages can include request/response
 payloads. File output is appended, with timestamps and no terminal colors.
 New logs use UTF-8; existing PowerShell UTF-16LE logs keep their encoding.
 Arguments are forwarded, for example `bun run dev:cache --port 4142`.
@@ -578,7 +602,7 @@ and tool content; full tracing is not needed for cache summaries.
 | Command | |
 | ------- | --- |
 | `bun run dev` | Development server (`--account-type enterprise`, port 4141), without full tracing |
-| `bun run dev:cache` | Console logs plus file-only debug logs; cache summaries require `COPILOT_CACHE_DIAGNOSTICS=1` |
+| `bun run dev:cache` | Console logs and request summaries plus file-only debug logs; JSON cache diagnostics require `COPILOT_CACHE_DIAGNOSTICS=1` |
 | `bun run dev:trace` | Development server with full request/response tracing |
 | `bun run lint` | ESLint (`@echristian/eslint-config`) |
 | `bun test` | Unit test suite |

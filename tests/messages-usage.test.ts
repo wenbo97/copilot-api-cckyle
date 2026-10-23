@@ -326,7 +326,7 @@ test.each(["/responses", "/chat/completions"])(
 test("Messages diagnostics distinguish unknown from zero and unverified writes without leaking content", async () => {
   process.env.COPILOT_CACHE_DIAGNOSTICS = "1"
   selectModel("/chat/completions")
-  const info = spyOn(consola, "info").mockImplementation(
+  const info = spyOn(consola, "debug").mockImplementation(
     Object.assign(() => undefined, { raw: () => undefined }),
   )
   const summaries = () =>
@@ -414,7 +414,7 @@ test.each(["/responses", "/chat/completions"])(
 
 test("translated Responses diagnostics are opt-in and record terminal cumulative usage once", async () => {
   selectModel("/responses")
-  const info = spyOn(consola, "info").mockImplementation(
+  const info = spyOn(consola, "debug").mockImplementation(
     Object.assign(() => undefined, { raw: () => undefined }),
   )
   const summaries = () =>

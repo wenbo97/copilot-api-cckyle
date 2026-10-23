@@ -267,7 +267,9 @@ async function readSamples(file: string, range: Range) {
       for await (const rawLine of lines) {
         const line = rawLine.replace(/^\uFEFF/, "")
         const match =
-          /^(?:(\S+)\s+)?(?:\[info\]\s+)?\[cache-diagnostics\](.*)$/.exec(line)
+          /^(?:(\S+)\s+)?(?:\[(?:info|debug)\]\s+)?\[cache-diagnostics\](.*)$/.exec(
+            line,
+          )
         if (!match) continue
         let parsed: ReturnType<typeof parseSample>
         try {

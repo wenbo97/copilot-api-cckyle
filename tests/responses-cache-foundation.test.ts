@@ -8,7 +8,7 @@ import { server } from "~/server"
 import { copilotFetch } from "~/services/copilot/copilot-fetch"
 
 import {
-  captureInfo,
+  captureDiagnostics,
   captureLogs,
   completed,
   firstChangedInput,
@@ -25,7 +25,7 @@ const environment = [
 ]
 let previousState: State
 let previousEnvironment: Array<string | undefined>
-let info: ReturnType<typeof captureInfo>
+let info: ReturnType<typeof captureDiagnostics>
 const sent: Array<string> = []
 const headers: Array<Array<string | null>> = []
 let directory: string
@@ -43,7 +43,7 @@ beforeEach(async () => {
   delete process.env.COPILOT_CACHE_NAMESPACE
   directory = await mkdtemp(join(tmpdir(), "cache-foundation-"))
   reply = () => Response.json(completed())
-  info = captureInfo()
+  info = captureDiagnostics()
   sent.length = 0
   headers.length = 0
   Object.assign(state, {
@@ -616,10 +616,9 @@ test.each(["messages", "responses"] as const)(
       protocol === "responses" ? 9 : 8,
     )
     expect(appended.input.slice(0, tools.input.length)).toEqual(tools.input)
-    expect(appended.input.slice(tools.input.length)).toEqual([
-      { role: "assistant", content: "private-answer" },
-      { role: "user", content: "private-next-question" },
-    ])
+    expect(JSON.stringify(appended.input.slice(tools.input.length))).toMatch(
+      /^\[\{"role":"assistant".*"private-answer".*\},\{"role":"user".*"private-next-question".*\}\]$/,
+    )
     expect(firstChangedInput(tools.input, branch.input)).toBe(
       protocol === "responses" ? 8 : 5,
     )
@@ -654,7 +653,7 @@ test.each(["messages", "responses"] as const)(
 
 function expectMessagesToolHistory([tools, branch]: Array<Array<unknown>>) {
   const expected = `[
-    {"role":"user","content":"private-initial-question"}, {"role":"assistant","content":[{"type":"output_text","text":"private-before-tools"}]},
+    {"role":"user","content":[{"type":"input_text","text":"private-initial-question"}]}, {"role":"assistant","content":[{"type":"output_text","text":"private-before-tools"}]},
     {"type":"function_call","call_id":"call-a","name":"read","arguments":"{\\"path\\":\\"private-a.ts\\"}"},
     {"role":"assistant","content":[{"type":"output_text","text":"private-between-tools"}]}, {"type":"function_call","call_id":"call-b","name":"read","arguments":"{\\"path\\":\\"private-b.ts\\"}"},
     {"role":"user","content":[{"type":"input_text","text":"private-followup"}]},

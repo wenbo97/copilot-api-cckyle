@@ -1,8 +1,8 @@
 import { spyOn } from "bun:test"
 import consola from "consola"
 
-export function captureInfo() {
-  return spyOn(consola, "info").mockImplementation(
+export function captureDiagnostics() {
+  return spyOn(consola, "debug").mockImplementation(
     Object.assign(() => undefined, { raw: () => undefined }),
   )
 }

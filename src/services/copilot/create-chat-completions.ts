@@ -2,6 +2,12 @@ import type { CopilotRequestOptions } from "./request-options"
 
 export type { CopilotRequestOptions } from "./request-options"
 
+import {
+  summarizeFailure,
+  summarizeJson,
+  summarizeStream,
+} from "~/lib/request-summary"
+
 import { copilotFetch } from "./copilot-fetch"
 import { CopilotStreamLifecycle } from "./stream-lifecycle"
 
@@ -29,21 +35,29 @@ export const createChatCompletions = async (
       new CopilotStreamLifecycle(options.signal, options.streamTimeouts)
     : undefined
 
+  const summary = options.summary
   try {
+    const serializedBody = JSON.stringify(payload)
+    summary?.attempt("chat", serializedBody, payload.messages.length)
     const response = await copilotFetch("/chat/completions", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: serializedBody,
       extraHeaders,
       signal: streamLifecycle?.signal ?? options.signal,
       headerTimeoutMs: options.headerTimeoutMs,
       disableNativeTimeout: payload.stream === true,
     })
 
-    if (streamLifecycle) return streamLifecycle.iterate(response)
+    if (streamLifecycle)
+      return summarizeStream(summary, streamLifecycle.iterate(response))
 
-    return (await response.json()) as ChatCompletionResponse
+    return summarizeJson(
+      summary,
+      (await response.json()) as ChatCompletionResponse,
+    )
   } catch (error) {
     streamLifecycle?.dispose(error)
+    summarizeFailure(summary, error)
     throw error
   }
 }

@@ -6,6 +6,7 @@ import type {
   ResponsesPayload,
 } from "~/routes/responses/responses-types"
 
+import { summarizeFailure, summarizeStream } from "~/lib/request-summary"
 import { applyResponsesCachePolicy } from "~/lib/responses-cache-policy"
 import { ResponsesDiagnostics } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
@@ -34,9 +35,48 @@ export const createResponses = async (
   payload: ResponsesPayload,
   options: CopilotRequestOptions = {},
 ) => {
-  const enableVision = hasVisionContent(payload)
-  const isAgentCall = hasAgentMessages(payload)
+  const { body, cachePolicy } = await prepareResponsesBody(payload, options)
+  const diagnostics = ResponsesDiagnostics.start({
+    ingress: payload,
+    egress: body,
+    signal: options.signal,
+    cachePolicy,
+    origin: options.responsesDiagnostics,
+  })
 
+  const summary = options.summary
+  const attemptObserver = diagnostics?.attemptObserver()
+  summary?.useRequestId(attemptObserver?.requestId)
+  try {
+    const response = await requestResponsesWithHistoryRecovery(
+      body,
+      buildResponsesHeaders(payload),
+      {
+        ...options,
+        observer: attemptObserver,
+      },
+    )
+    if (Symbol.asyncIterator in response) {
+      const events = diagnostics ? diagnostics.iterate(response) : response
+      // Events are already parsed and observed by the history request.
+      return summarizeStream(summary, events, false)
+    }
+    diagnostics?.observeResponse(response)
+    diagnostics?.finish()
+    summary?.finish()
+    return response
+  } catch (error) {
+    diagnostics?.fail(error)
+    diagnostics?.finish()
+    summarizeFailure(summary, error)
+    throw error
+  }
+}
+
+async function prepareResponsesBody(
+  payload: ResponsesPayload,
+  options: CopilotRequestOptions,
+) {
   const compatible = await applyForeignReasoningPolicy(
     rewriteCollaborationForCopilot(
       sanitizeReasoningItems(
@@ -54,40 +94,17 @@ export const createResponses = async (
       accountType: state.accountType,
     },
   )
-  const diagnostics = ResponsesDiagnostics.start({
-    ingress: payload,
-    egress: body,
-    signal: options.signal,
-    cachePolicy,
-    origin: options.responsesDiagnostics,
-  })
+  return { body, cachePolicy }
+}
 
+function buildResponsesHeaders(
+  payload: ResponsesPayload,
+): Record<string, string> {
   const extraHeaders: Record<string, string> = {
-    "X-Initiator": isAgentCall ? "agent" : "user",
+    "X-Initiator": hasAgentMessages(payload) ? "agent" : "user",
   }
-  if (enableVision) extraHeaders["copilot-vision-request"] = "true"
-
-  try {
-    const response = await requestResponsesWithHistoryRecovery(
-      body,
-      extraHeaders,
-      {
-        ...options,
-        observer: diagnostics?.attemptObserver(),
-      },
-    )
-    if (Symbol.asyncIterator in response) {
-      return diagnostics ? diagnostics.iterate(response) : response
-    }
-    const result = response
-    diagnostics?.observeResponse(result)
-    diagnostics?.finish()
-    return result
-  } catch (error) {
-    diagnostics?.fail(error)
-    diagnostics?.finish()
-    throw error
-  }
+  if (hasVisionContent(payload)) extraHeaders["copilot-vision-request"] = "true"
+  return extraHeaders
 }
 
 function normalizeReasoningEffort(payload: ResponsesPayload): ResponsesPayload {

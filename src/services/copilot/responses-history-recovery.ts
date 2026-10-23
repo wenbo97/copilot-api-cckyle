@@ -137,6 +137,11 @@ class HistoryRequest {
         : undefined
       try {
         const serializedBody = JSON.stringify(this.body)
+        this.options.summary?.attempt(
+          "responses",
+          serializedBody,
+          Array.isArray(this.body.input) ? this.body.input.length : 1,
+        )
         const response = await copilotFetch("/responses", {
           method: "POST",
           body: serializedBody,
@@ -250,6 +255,7 @@ class HistoryRequest {
   }
 
   private observeValue(value: unknown): void {
+    this.options.summary?.observe(value)
     const observer = this.options.observer
     if (observer) observeRequest(() => observer.value(value))
   }

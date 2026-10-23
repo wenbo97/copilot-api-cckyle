@@ -4,6 +4,9 @@ import { observeRequest } from "~/services/copilot/request-observer"
 
 import { readMessagesUsage, type MessagesUsage } from "./usage-translation"
 
+/** `messages` is the native /v1/messages passthrough; the others are bridges. */
+export type MessagesUsageSource = "chat" | "responses" | "messages"
+
 /** Bounded observations, independent of native Responses and billing reports. */
 export class MessagesUsageDiagnostics {
   private finished = false
@@ -12,9 +15,9 @@ export class MessagesUsageDiagnostics {
     process.env.COPILOT_CACHE_DIAGNOSTICS ?? "",
   )
 
-  private readonly source: "chat" | "responses"
+  private readonly source: MessagesUsageSource
 
-  constructor(source: "chat" | "responses") {
+  constructor(source: MessagesUsageSource) {
     this.source = source
   }
 
@@ -22,13 +25,19 @@ export class MessagesUsageDiagnostics {
     this.requestId = requestId
   }
 
-  finish(usage = readMessagesUsage(undefined, this.source)): void {
+  finish(
+    usage = readMessagesUsage(
+      undefined,
+      this.source === "messages" ? "responses" : this.source,
+    ),
+    extra?: () => Record<string, unknown>,
+  ): void {
     if (this.finished) return
     this.finished = true
     if (!this.enabled) return
     const fallbackReasons = reasons(usage)
     observeRequest(() =>
-      consola.info(
+      consola.debug(
         `[messages-usage] ${JSON.stringify({
           source: this.source,
           ...(this.requestId ? { request_id: this.requestId } : {}),
@@ -42,6 +51,7 @@ export class MessagesUsageDiagnostics {
           // These are translated counters, not verified provider/account deductions.
           billing_complete: false,
           fallback_reasons: fallbackReasons,
+          ...extra?.(),
         })}`,
       ),
     )
@@ -58,7 +68,7 @@ function reasons(usage: MessagesUsage): Array<string> {
 }
 
 export async function withMessagesUsage<T>(
-  source: "chat" | "responses",
+  source: MessagesUsageSource,
   run: (diagnostics: MessagesUsageDiagnostics) => Promise<T>,
 ): Promise<T> {
   const diagnostics = new MessagesUsageDiagnostics(source)

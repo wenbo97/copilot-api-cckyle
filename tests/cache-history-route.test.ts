@@ -6,7 +6,11 @@ import { join } from "node:path"
 import { state, type State } from "~/lib/state"
 import { server } from "~/server"
 
-import { captureInfo, captureLogs, completed } from "./fixtures/responses-cache"
+import {
+  captureDiagnostics,
+  captureLogs,
+  completed,
+} from "./fixtures/responses-cache"
 
 const originalFetch = globalThis.fetch
 const environment = [
@@ -18,7 +22,7 @@ const environment = [
 let previousEnvironment: Array<string | undefined>
 let previousState: State
 let directory: string
-let info: ReturnType<typeof captureInfo>
+let info: ReturnType<typeof captureDiagnostics>
 const sent: Array<string> = []
 let reply: () => Response
 beforeEach(async () => {
@@ -29,7 +33,7 @@ beforeEach(async () => {
   delete process.env.COPILOT_CACHE_NAMESPACE
   delete process.env.COPILOT_FOREIGN_REASONING_MANIFEST
   directory = await mkdtemp(join(tmpdir(), "cache-history-route-"))
-  info = captureInfo()
+  info = captureDiagnostics()
   sent.length = 0
   reply = () => Response.json(completed())
   Object.assign(state, {

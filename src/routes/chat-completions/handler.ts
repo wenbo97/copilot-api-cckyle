@@ -4,9 +4,11 @@ import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { debugJson } from "~/lib/debug-log"
 import { pickEgress } from "~/lib/endpoint-router"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { RequestSummary } from "~/lib/request-summary"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
@@ -23,7 +25,7 @@ export async function handleCompletion(c: Context) {
   let payload = await c.req.json<ChatCompletionsPayload>()
   preserveStreamingRequest(c.req.raw, payload)
   await checkRateLimit(state, c.req.raw.signal)
-  consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
+  debugJson("Request payload:", () => payload, 400)
 
   // Normalize the requested model id to a catalog id ONCE (exact id → alias →
   // strip [..] suffix), then route under that id.
@@ -79,14 +81,17 @@ export async function handleCompletion(c: Context) {
       ...payload,
       max_tokens: selectedModel?.capabilities.limits.max_output_tokens,
     }
-    consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
+    debugJson("Set max_tokens to:", () => payload.max_tokens)
   }
 
-  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const requestOptions = copilotRequestOptions(
+    c.req.raw.signal,
+    new RequestSummary("chat", payload.model),
+  )
   const response = await createChatCompletions(payload, requestOptions)
 
   if (isNonStreaming(response)) {
-    consola.debug("Non-streaming response:", JSON.stringify(response))
+    debugJson("Non-streaming response:", () => response)
     // Trace the non-streaming response
     await traceResponse(response, traceTimestamp)
     return c.json(response)
@@ -98,7 +103,7 @@ export async function handleCompletion(c: Context) {
     const streamTracer = new StreamTracer(traceTimestamp)
     try {
       for await (const chunk of response) {
-        consola.debug("Streaming chunk:", JSON.stringify(chunk))
+        debugJson("Streaming chunk:", () => chunk)
         streamTracer.addChunk(chunk)
         await stream.writeSSE(chunk as SSEMessage)
       }

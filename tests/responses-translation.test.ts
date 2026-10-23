@@ -58,7 +58,29 @@ describe("translateAnthropicToResponses (request)", () => {
     const out = translateAnthropicToResponses(payload)
     expect(out.instructions).toBe("You are terse.")
     expect(out.max_output_tokens).toBe(100)
-    expect(out.input).toEqual([{ role: "user", content: "hi" }])
+    expect(out.input).toEqual([
+      { role: "user", content: [{ type: "input_text", text: "hi" }] },
+    ])
+  })
+
+  test("string and single-text-block prompts translate to identical bytes", () => {
+    const asBlock = translateAnthropicToResponses({
+      model: "gpt-5.5",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "fix it" }] },
+        { role: "assistant", content: [{ type: "text", text: "done" }] },
+      ],
+    })
+    const asString = translateAnthropicToResponses({
+      model: "gpt-5.5",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "fix it" },
+        { role: "assistant", content: "done" },
+      ],
+    })
+    expect(JSON.stringify(asString.input)).toBe(JSON.stringify(asBlock.input))
   })
 
   test("flattens an array system prompt with blank lines", () => {

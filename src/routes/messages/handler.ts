@@ -4,9 +4,12 @@ import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { inspectCacheIntent } from "~/lib/cache-intent"
+import { debugJson } from "~/lib/debug-log"
 import { pickEgress } from "~/lib/endpoint-router"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { RequestSummary } from "~/lib/request-summary"
 import { responsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
 import { StreamTracer, traceRequest, traceResponse } from "~/lib/trace"
@@ -31,6 +34,9 @@ import {
   type AnthropicMessagesPayload,
   type AnthropicResponse,
 } from "./anthropic-types"
+import { withBridgeCacheKey } from "./bridge-cache-key"
+import { stripBridgeReasoning } from "./bridge-reasoning"
+import { stabilizeBridgeTools } from "./bridge-stability"
 import { streamMessagesFromChat } from "./chat-stream"
 import {
   translateToAnthropic,
@@ -49,13 +55,13 @@ import {
   withMessagesUsage,
   type MessagesUsageDiagnostics,
 } from "./usage-diagnostics"
-import { readMessagesUsage } from "./usage-translation"
+import { readMessagesUsage, type MessagesUsage } from "./usage-translation"
 
 export async function handleCompletion(c: Context) {
   let anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   preserveStreamingRequest(c.req.raw, anthropicPayload)
   await checkRateLimit(state, c.req.raw.signal)
-  consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
+  debugJson("Anthropic request payload:", () => anthropicPayload)
 
   // Normalize the requested model id to a catalog id ONCE (exact id → alias →
   // strip [..] suffix), then route under that id.
@@ -76,8 +82,12 @@ export async function handleCompletion(c: Context) {
   //   /chat/completions → legacy translate-down path.
   //   unsupported       → clean 4xx (no implemented leg for this model).
   const egress = pickEgress("messages", anthropicPayload.model)
+  if (egress !== "/responses")
+    anthropicPayload = stripBridgeReasoning(anthropicPayload)
   if (egress === "/v1/messages") {
-    return handlePassthroughMessages(c, anthropicPayload)
+    return withMessagesUsage("messages", (diagnostics) =>
+      handlePassthroughMessages(c, anthropicPayload, diagnostics),
+    )
   }
   if (egress === "/responses") {
     return withMessagesUsage("responses", (diagnostics) =>
@@ -118,16 +128,16 @@ async function handleCompletionViaChat(
     `[Anthropic] Using model: "${anthropicPayload.model}" -> translated to: "${openAIPayload.model}"`,
   )
 
-  consola.debug(
-    "Translated OpenAI request payload:",
-    JSON.stringify(openAIPayload),
-  )
+  debugJson("Translated OpenAI request payload:", () => openAIPayload)
 
   if (state.manualApprove) {
     await awaitApproval()
   }
 
-  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const requestOptions = copilotRequestOptions(
+    c.req.raw.signal,
+    new RequestSummary("messages", anthropicPayload.model),
+  )
   const trailerController = new AbortController()
   const response = await createChatCompletions(openAIPayload, {
     ...requestOptions,
@@ -135,16 +145,10 @@ async function handleCompletionViaChat(
   })
 
   if (isNonStreaming(response)) {
-    consola.debug(
-      "Non-streaming response from Copilot:",
-      JSON.stringify(response).slice(-400),
-    )
+    debugJson("Non-streaming response from Copilot:", () => response, 400)
     const anthropicResponse = translateToAnthropic(response)
     diagnostics.finish(readMessagesUsage(response.usage, "chat"))
-    consola.debug(
-      "Translated Anthropic response:",
-      JSON.stringify(anthropicResponse),
-    )
+    debugJson("Translated Anthropic response:", () => anthropicResponse)
     // Trace the response (both OpenAI and translated Anthropic)
     await traceResponse(
       {
@@ -180,6 +184,7 @@ const isNonStreaming = (
 async function handlePassthroughMessages(
   c: Context,
   payload: AnthropicMessagesPayload,
+  diagnostics: MessagesUsageDiagnostics,
 ) {
   consola.info(`[Anthropic] Using model: "${payload.model}" (passthrough)`)
 
@@ -190,7 +195,13 @@ async function handlePassthroughMessages(
 
   if (state.manualApprove) await awaitApproval()
 
-  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const summary = new RequestSummary("messages", payload.model)
+  diagnostics.setRequestId(summary.id)
+  const finishDiagnostics = () =>
+    diagnostics.finish(passthroughUsage(summary), () =>
+      passthroughDiagnostics(payload, summary),
+    )
+  const requestOptions = copilotRequestOptions(c.req.raw.signal, summary)
   const response = await createMessages(
     payload,
     {
@@ -201,9 +212,11 @@ async function handlePassthroughMessages(
   )
 
   if (isMessagesNonStreaming(response)) {
-    consola.debug(
+    finishDiagnostics()
+    debugJson(
       "Non-streaming passthrough response from Copilot:",
-      JSON.stringify(response).slice(-400),
+      () => response,
+      400,
     )
     await traceResponse(
       { type: "anthropic-passthrough", native: response },
@@ -219,7 +232,7 @@ async function handlePassthroughMessages(
 
     try {
       for await (const rawEvent of response) {
-        consola.debug("Copilot raw messages event:", JSON.stringify(rawEvent))
+        debugJson("Copilot raw messages event:", () => rawEvent)
         if (rawEvent.data === "[DONE]") break
         if (!rawEvent.data) continue
 
@@ -231,9 +244,35 @@ async function handlePassthroughMessages(
         })
       }
     } finally {
+      finishDiagnostics()
       await streamTracer.finish()
     }
   })
+}
+
+function passthroughUsage(summary: RequestSummary): MessagesUsage {
+  return {
+    totalInput: summary.usage.totalInput,
+    cachedInput: summary.usage.cachedInput,
+    output: summary.usage.output,
+    // Native Anthropic reports cache creation as its own verified counter.
+    unverifiedWrite: false,
+  }
+}
+
+function passthroughDiagnostics(
+  payload: AnthropicMessagesPayload,
+  summary: RequestSummary,
+): Record<string, unknown> {
+  const intent = inspectCacheIntent(payload, "messages")
+  return {
+    cache_write_tokens: summary.usage.cacheWrite ?? null,
+    // cache_control is forwarded unchanged on the native path.
+    cache_intent: {
+      ...intent,
+      status: intent.present ? "observed" : "absent",
+    },
+  }
 }
 
 // Non-streaming native responses are a plain Anthropic Message object (has a
@@ -262,8 +301,12 @@ async function handleCompletionViaResponses(
     c.req.raw.headers,
   )
   diagnostics.setRequestId(origin?.requestId)
-  const toolNames = createToolNameMap(payload)
-  const responsesPayload = translateAnthropicToResponses(payload, toolNames)
+  const bridged = stabilizeBridgeTools(payload)
+  const toolNames = createToolNameMap(bridged)
+  const responsesPayload = withBridgeCacheKey(
+    translateAnthropicToResponses(bridged, toolNames),
+    payload,
+  )
 
   const traceTimestamp = await traceRequest({
     type: "anthropic-via-responses",
@@ -273,7 +316,10 @@ async function handleCompletionViaResponses(
 
   if (state.manualApprove) await awaitApproval()
 
-  const requestOptions = copilotRequestOptions(c.req.raw.signal)
+  const requestOptions = copilotRequestOptions(
+    c.req.raw.signal,
+    new RequestSummary("messages", payload.model),
+  )
   const response = await createResponses(responsesPayload, {
     ...requestOptions,
     responsesDiagnostics: origin,
@@ -343,20 +389,18 @@ async function handleCompletionViaResponses(
       if (!requestOptions.signal.aborted && !streamState.terminalSeen)
         await fail("Upstream Responses stream ended before a terminal event.")
     } catch (error) {
-      if (!requestOptions.signal.aborted) {
-        const message = error instanceof Error ? error.message : String(error)
-        await fail(
-          message
-            + (error instanceof ResponsesUpstreamError ?
-              describeHistoryRecovery(error.recovery)
-            : ""),
-        )
-      }
+      if (!requestOptions.signal.aborted) await fail(bridgeFailureText(error))
     } finally {
       diagnostics.finish(streamState.usage)
       await streamTracer.finish()
     }
   })
+}
+
+function bridgeFailureText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!(error instanceof ResponsesUpstreamError)) return message
+  return message + describeHistoryRecovery(error.recovery)
 }
 
 // The native /responses egress returns a ResponseObject (has an `output` array)

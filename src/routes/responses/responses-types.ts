@@ -86,6 +86,15 @@ export type ResponseInputItem =
   | ResponseInputMessage
   | ResponseInputFunctionCall
   | ResponseInputFunctionCallOutput
+  | ResponseInputReasoning
+
+// Replayed reasoning (stateless): the backend verifies `encrypted_content`.
+export interface ResponseInputReasoning {
+  type: "reasoning"
+  id?: string
+  summary: Array<{ type: "summary_text"; text: string }>
+  encrypted_content: string
+}
 
 export interface ResponseInputMessage {
   type?: "message"
