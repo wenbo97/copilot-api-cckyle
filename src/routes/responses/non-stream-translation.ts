@@ -15,6 +15,7 @@ import type {
   ResponseInputMessage,
   ResponseObject,
   ResponseOutputFunctionCall,
+  ResponseOutputContent,
   ResponseOutputItem,
   ResponseOutputMessage,
   ResponseTextFormat,
@@ -357,19 +358,22 @@ function translateChoiceOutput(
   status: OutputItemStatus,
 ): Array<ResponseOutputItem> {
   const output: Array<ResponseOutputItem> = []
-  if (choice.message.content) {
+  const content: Array<ResponseOutputContent> = []
+  if (choice.message.content)
+    content.push({
+      type: "output_text",
+      text: choice.message.content,
+      annotations: [],
+    })
+  if (choice.message.refusal)
+    content.push({ type: "refusal", refusal: choice.message.refusal })
+  if (content.length > 0) {
     output.push({
       type: "message",
       id: `msg_${responseId}`,
       role: "assistant",
       status,
-      content: [
-        {
-          type: "output_text",
-          text: choice.message.content,
-          annotations: [],
-        },
-      ],
+      content,
     })
   }
 

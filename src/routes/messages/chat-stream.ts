@@ -3,6 +3,7 @@ import type { Context } from "hono"
 
 import { streamSSE } from "hono/streaming"
 
+import type { ToolNameMap } from "~/routes/_shared/tool-name"
 import type { CopilotRequestScope } from "~/services/copilot/request-options"
 
 import { StreamTracer } from "~/lib/trace"
@@ -21,6 +22,7 @@ import {
 } from "./stream-translation"
 
 interface ChatStreamContext {
+  toolNames: ToolNameMap
   response: AsyncGenerator<ServerSentEventMessage>
   requestOptions: CopilotRequestScope
   trailerController: AbortController
@@ -58,7 +60,11 @@ export function streamMessagesFromChat(c: Context, context: ChatStreamContext) {
         if (!rawEvent.data) continue
         const chunk = parseChatCompletionSseData(rawEvent.data)
         tracer.addChunk({ openai: chunk })
-        const events = translateChunkToAnthropicEvents(chunk, state)
+        const events = translateChunkToAnthropicEvents(
+          chunk,
+          state,
+          context.toolNames,
+        )
         if (
           state.pendingStopReason
           && !state.terminalEmitted
@@ -102,6 +108,7 @@ export function streamMessagesFromChat(c: Context, context: ChatStreamContext) {
       }
     } finally {
       if (trailerTimer !== undefined) clearTimeout(trailerTimer)
+      state.toolCalls = {}
       context.diagnostics.finish(state.usage)
       await tracer.finish()
     }

@@ -8,6 +8,7 @@ import { debugJson } from "~/lib/debug-log"
 import { pickEgress } from "~/lib/endpoint-router"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { observeRequestLogIdentity } from "~/lib/request-log-context"
 import { RequestSummary } from "~/lib/request-summary"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -23,6 +24,7 @@ import { copilotRequestOptions } from "~/services/copilot/request-options"
 
 export async function handleCompletion(c: Context) {
   let payload = await c.req.json<ChatCompletionsPayload>()
+  observeRequestLogIdentity(payload, c.req.raw.headers)
   preserveStreamingRequest(c.req.raw, payload)
   await checkRateLimit(state, c.req.raw.signal)
   debugJson("Request payload:", () => payload, 400)

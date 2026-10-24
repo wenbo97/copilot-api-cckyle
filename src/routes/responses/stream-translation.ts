@@ -5,6 +5,7 @@ import type {
   ResponseOutputFunctionCall,
   ResponseOutputItem,
   ResponseOutputMessage,
+  ResponseOutputContent,
   ResponseStreamEvent,
   ResponseStreamState,
 } from "./responses-types"
@@ -34,7 +35,10 @@ export function translateChunkToResponseEvents(
   if (state.pendingResponse) {
     if (
       chunk.choices.some(
-        (choice) => choice.delta.content || choice.delta.tool_calls?.length,
+        (choice) =>
+          choice.delta.content
+          || choice.delta.refusal
+          || choice.delta.tool_calls?.length,
       )
     ) {
       return translateStreamFailureToResponseEvents(
@@ -139,11 +143,11 @@ function emitResponseStart(
 }
 
 function emitTextDelta(
-  delta: { content?: string | null },
+  delta: { content?: string | null; refusal?: string | null },
   state: ResponseStreamState,
   events: Array<ResponseStreamEvent>,
 ): void {
-  if (!delta.content) return
+  if (!delta.content && !delta.refusal) return
 
   if (!state.messageItemOpen) {
     state.messageOutputItemIndex = reserveOutputIndex(state)
@@ -157,22 +161,91 @@ function emitTextDelta(
       output_index: state.messageOutputItemIndex,
       item,
     })
-    pushEvent(state, events, {
-      type: "response.content_part.added",
-      item_id: state.messageItemId,
-      output_index: state.messageOutputItemIndex,
-      content_index: 0,
-      part: { type: "output_text", text: "", annotations: [] },
-    })
   }
 
-  state.textContent = (state.textContent ?? "") + delta.content
+  if (delta.content)
+    emitMessagePartDelta(
+      { type: "output_text", text: delta.content, annotations: [] },
+      state,
+      events,
+    )
+  if (delta.refusal)
+    emitMessagePartDelta(
+      { type: "refusal", refusal: delta.refusal },
+      state,
+      events,
+    )
+}
+
+function emitMessagePartDelta(
+  incoming: ResponseOutputContent,
+  state: ResponseStreamState,
+  events: Array<ResponseStreamEvent>,
+): void {
+  const parts = (state.messageParts ??= [])
+  const type = incoming.type
+  const delta =
+    incoming.type === "output_text" ? incoming.text : incoming.refusal
+  let part = parts.at(-1)
+  if (part?.type !== type) {
+    if (part) closeMessagePart(state, events)
+    part =
+      type === "output_text" ?
+        { type, text: "", annotations: [] }
+      : { type, refusal: "" }
+    parts.push(part)
+    pushEvent(state, events, {
+      type: "response.content_part.added",
+      item_id: requireMessageItemId(state),
+      output_index: requireMessageOutputIndex(state),
+      content_index: parts.length - 1,
+      part: { ...part },
+    })
+  }
+  if (part.type === "output_text") {
+    part.text += delta
+    state.textContent = (state.textContent ?? "") + delta
+  } else part.refusal += delta
   pushEvent(state, events, {
-    type: "response.output_text.delta",
+    type:
+      type === "output_text" ?
+        "response.output_text.delta"
+      : "response.refusal.delta",
     item_id: requireMessageItemId(state),
     output_index: requireMessageOutputIndex(state),
-    content_index: 0,
-    delta: delta.content,
+    content_index: parts.length - 1,
+    delta,
+  })
+}
+
+function closeMessagePart(
+  state: ResponseStreamState,
+  events: Array<ResponseStreamEvent>,
+): void {
+  const parts = state.messageParts ?? []
+  const part = parts.at(-1)
+  if (!part) return
+  const address = {
+    item_id: requireMessageItemId(state),
+    output_index: requireMessageOutputIndex(state),
+    content_index: parts.length - 1,
+  }
+  if (part.type === "output_text")
+    pushEvent(state, events, {
+      type: "response.output_text.done",
+      ...address,
+      text: part.text,
+    })
+  else
+    pushEvent(state, events, {
+      type: "response.refusal.done",
+      ...address,
+      refusal: part.refusal,
+    })
+  pushEvent(state, events, {
+    type: "response.content_part.done",
+    ...address,
+    part: { ...part },
   })
 }
 
@@ -411,25 +484,10 @@ function closeMessageItem(
   status: OutputItemStatus,
   events: Array<ResponseStreamEvent>,
 ): ResponseOutputMessage {
-  const itemId = requireMessageItemId(state)
   const outputIndex = requireMessageOutputIndex(state)
-  const text = state.textContent ?? ""
   const item = makeMessageItem(state, status)
 
-  pushEvent(state, events, {
-    type: "response.output_text.done",
-    item_id: itemId,
-    output_index: outputIndex,
-    content_index: 0,
-    text,
-  })
-  pushEvent(state, events, {
-    type: "response.content_part.done",
-    item_id: itemId,
-    output_index: outputIndex,
-    content_index: 0,
-    part: { type: "output_text", text, annotations: [] },
-  })
+  closeMessagePart(state, events)
   pushEvent(state, events, {
     type: "response.output_item.done",
     output_index: outputIndex,
@@ -476,13 +534,7 @@ function makeMessageItem(
     content:
       status === "in_progress" ?
         []
-      : [
-          {
-            type: "output_text",
-            text: state.textContent ?? "",
-            annotations: [],
-          },
-        ],
+      : (state.messageParts ?? []).map((part) => ({ ...part })),
   }
 }
 

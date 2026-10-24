@@ -129,7 +129,7 @@ function selectModel(endpoint: string, efforts = ["low", "medium", "high"]) {
       object: "model_capabilities",
       tokenizer: "o200k_base",
       limits: { max_output_tokens: 4096 },
-      supports: { reasoning_effort: efforts },
+      supports: { reasoning_effort: efforts, structured_outputs: true },
     },
   }
   state.models = { object: "list", data: [model] }
@@ -187,12 +187,18 @@ for (const endpoint of ["/responses", "/chat/completions", "/v1/messages"]) {
     ]) {
       test(`${endpoint} stream=${stream} preserves explicit low with ${thinking?.type ?? "absent"} thinking`, async () => {
         selectModel(endpoint)
+        const schema = {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        }
         const response = await request({
           thinking,
           stream,
           output_config: {
             effort: "low",
-            format: { type: "json_schema", schema: { type: "object" } },
+            format: { type: "json_schema", schema },
           },
         })
         expect(response.status).toBe(200)
@@ -205,7 +211,7 @@ for (const endpoint of ["/responses", "/chat/completions", "/v1/messages"]) {
         else
           expect(sent.output_config).toEqual({
             effort: "low",
-            format: { type: "json_schema", schema: { type: "object" } },
+            format: { type: "json_schema", schema },
           })
       })
     }

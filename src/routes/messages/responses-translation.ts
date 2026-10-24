@@ -1,4 +1,5 @@
 import { InvalidRequestError } from "~/lib/error"
+import { messagesOutputFormat } from "~/routes/_shared/output-format"
 import {
   clampReasoningEffort,
   resolveMessagesReasoningEffort,
@@ -8,6 +9,7 @@ import { createToolNameMap, type ToolNameMap } from "~/routes/_shared/tool-name"
 import {
   anthropicToolsToResponses,
   anthropicToolChoiceToResponses,
+  anthropicParallelToolCalls,
 } from "~/routes/_shared/tool-translation"
 
 import type {
@@ -44,6 +46,7 @@ export function translateAnthropicToResponses(
   payload: AnthropicMessagesPayload,
   toolNames: ToolNameMap = createToolNameMap(payload),
 ): ResponsesPayload {
+  const format = messagesOutputFormat(payload)
   const effort = clampReasoningEffort(
     payload.model,
     resolveMessagesReasoningEffort(payload),
@@ -59,6 +62,8 @@ export function translateAnthropicToResponses(
     max_output_tokens: payload.max_tokens,
     tools: anthropicToolsToResponses(payload.tools, toolNames),
     tool_choice: anthropicToolChoiceToResponses(payload.tool_choice, toolNames),
+    parallel_tool_calls: anthropicParallelToolCalls(payload.tool_choice),
+    text: format ? { format } : undefined,
   }
 
   if (effort) result.reasoning = { effort }

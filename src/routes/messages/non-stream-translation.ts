@@ -1,5 +1,7 @@
+import { messagesOutputFormat } from "~/routes/_shared/output-format"
 import { resolveMessagesReasoningEffort } from "~/routes/_shared/reasoning-policy"
-import { truncateToolName } from "~/routes/_shared/tool-name"
+import { createToolNameMap, type ToolNameMap } from "~/routes/_shared/tool-name"
+import { anthropicParallelToolCalls } from "~/routes/_shared/tool-translation"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -31,7 +33,9 @@ import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
+  toolNames: ToolNameMap = createToolNameMap(payload),
 ): ChatCompletionsPayload {
+  const format = messagesOutputFormat(payload)
   return {
     // The model id is already a catalog id here: the handler resolves it via
     // resolveModelId() before dispatch. No further rewrite (the old
@@ -39,7 +43,11 @@ export function translateToOpenAI(
     // now corrupt a correct catalog id).
     model: payload.model,
     messages: sanitizeTrailingAssistant(
-      translateAnthropicMessagesToOpenAI(payload.messages, payload.system),
+      translateAnthropicMessagesToOpenAI(
+        payload.messages,
+        payload.system,
+        toolNames,
+      ),
     ),
     max_tokens: payload.max_tokens,
     stop: payload.stop_sequences,
@@ -48,9 +56,24 @@ export function translateToOpenAI(
     temperature: payload.temperature,
     top_p: payload.top_p,
     user: payload.metadata?.user_id,
-    tools: translateAnthropicToolsToOpenAI(payload.tools),
-    tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
+    tools: translateAnthropicToolsToOpenAI(payload.tools, toolNames),
+    tool_choice: translateAnthropicToolChoiceToOpenAI(
+      payload.tool_choice,
+      toolNames,
+    ),
+    parallel_tool_calls: anthropicParallelToolCalls(payload.tool_choice),
     reasoning_effort: resolveMessagesReasoningEffort(payload),
+    response_format:
+      format ?
+        {
+          type: "json_schema",
+          json_schema: {
+            name: format.name,
+            schema: format.schema,
+            strict: format.strict,
+          },
+        }
+      : undefined,
   }
 }
 
@@ -105,13 +128,14 @@ function extractTextForSanitization(content: Message["content"]): string {
 function translateAnthropicMessagesToOpenAI(
   anthropicMessages: Array<AnthropicMessage>,
   system: string | Array<AnthropicTextBlock> | undefined,
+  toolNames: ToolNameMap,
 ): Array<Message> {
   const systemMessages = handleSystemPrompt(system)
 
   const otherMessages = anthropicMessages.flatMap((message) =>
     message.role === "user" ?
       handleUserMessage(message)
-    : handleAssistantMessage(message),
+    : handleAssistantMessage(message, toolNames),
   )
 
   return [...systemMessages, ...otherMessages]
@@ -172,6 +196,7 @@ function handleUserMessage(message: AnthropicUserMessage): Array<Message> {
 
 function handleAssistantMessage(
   message: AnthropicAssistantMessage,
+  toolNames: ToolNameMap,
 ): Array<Message> {
   if (!Array.isArray(message.content)) {
     return [
@@ -209,7 +234,7 @@ function handleAssistantMessage(
             id: toolUse.id,
             type: "function",
             function: {
-              name: toolUse.name,
+              name: toolNames.toUpstream(toolUse.name),
               arguments: JSON.stringify(toolUse.input),
             },
           })),
@@ -277,6 +302,7 @@ function mapContent(
 
 function translateAnthropicToolsToOpenAI(
   anthropicTools: Array<AnthropicTool> | undefined,
+  toolNames: ToolNameMap,
 ): Array<Tool> | undefined {
   if (!anthropicTools) {
     return undefined
@@ -284,9 +310,7 @@ function translateAnthropicToolsToOpenAI(
   return anthropicTools.map((tool) => ({
     type: "function",
     function: {
-      // OpenAI caps function names at 64 chars; Anthropic does not. Truncate so
-      // the Messages->Chat path matches the Messages->Responses path (spec §5⑤d).
-      name: truncateToolName(tool.name),
+      name: toolNames.toUpstream(tool.name),
       description: tool.description,
       parameters: tool.input_schema,
     },
@@ -295,6 +319,7 @@ function translateAnthropicToolsToOpenAI(
 
 function translateAnthropicToolChoiceToOpenAI(
   anthropicToolChoice: AnthropicMessagesPayload["tool_choice"],
+  toolNames: ToolNameMap,
 ): ChatCompletionsPayload["tool_choice"] {
   if (!anthropicToolChoice) {
     return undefined
@@ -311,7 +336,7 @@ function translateAnthropicToolChoiceToOpenAI(
       if (anthropicToolChoice.name) {
         return {
           type: "function",
-          function: { name: anthropicToolChoice.name },
+          function: { name: toolNames.toUpstream(anthropicToolChoice.name) },
         }
       }
       return undefined
@@ -329,6 +354,7 @@ function translateAnthropicToolChoiceToOpenAI(
 
 export function translateToAnthropic(
   response: ChatCompletionResponse,
+  toolNames?: ToolNameMap,
 ): AnthropicResponse {
   // Merge content from all choices
   const allTextBlocks: Array<AnthropicTextBlock> = []
@@ -340,9 +366,14 @@ export function translateToAnthropic(
   // Process all choices to extract text and tool use blocks
   for (const choice of response.choices) {
     const textBlocks = getAnthropicTextBlocks(choice.message.content)
-    const toolUseBlocks = getAnthropicToolUseBlocks(choice.message.tool_calls)
+    const toolUseBlocks = getAnthropicToolUseBlocks(
+      choice.message.tool_calls,
+      toolNames,
+    )
 
     allTextBlocks.push(...textBlocks)
+    if (choice.message.refusal)
+      allTextBlocks.push({ type: "text", text: choice.message.refusal })
     allToolUseBlocks.push(...toolUseBlocks)
 
     // Use the finish_reason from the first choice, or prioritize tool_calls
@@ -359,7 +390,13 @@ export function translateToAnthropic(
     role: "assistant",
     model: response.model,
     content: [...allTextBlocks, ...allToolUseBlocks],
-    stop_reason: mapOpenAIStopReasonToAnthropic(stopReason),
+    stop_reason:
+      (
+        stopReason !== "length"
+        && response.choices.some((choice) => choice.message.refusal)
+      ) ?
+        "refusal"
+      : mapOpenAIStopReasonToAnthropic(stopReason),
     stop_sequence: null,
     usage: formatMessagesUsage(readMessagesUsage(response.usage, "chat")),
   }
@@ -383,6 +420,7 @@ function getAnthropicTextBlocks(
 
 function getAnthropicToolUseBlocks(
   toolCalls: Array<ToolCall> | undefined,
+  toolNames?: ToolNameMap,
 ): Array<AnthropicToolUseBlock> {
   if (!toolCalls) {
     return []
@@ -390,7 +428,8 @@ function getAnthropicToolUseBlocks(
   return toolCalls.map((toolCall) => ({
     type: "tool_use",
     id: toolCall.id,
-    name: toolCall.function.name,
+    name:
+      toolNames?.toOriginal(toolCall.function.name) ?? toolCall.function.name,
     input: JSON.parse(toolCall.function.arguments) as Record<string, unknown>,
   }))
 }

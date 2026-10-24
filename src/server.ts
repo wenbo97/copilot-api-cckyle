@@ -2,6 +2,11 @@ import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { logger } from "hono/logger"
 
+import {
+  createRequestLogContext,
+  requestLogLabel,
+  requestLogStorage,
+} from "./lib/request-log-context"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { messageRoutes } from "./routes/messages/route"
@@ -12,7 +17,16 @@ import { usageRoute } from "./routes/usage/route"
 
 export const server = new Hono()
 
-server.use(logger())
+server.use((c, next) => {
+  const context = createRequestLogContext(c.req.raw.headers)
+  return requestLogStorage.run(context, () =>
+    logger((message) =>
+      console.log(
+        `${message} ${requestLogLabel(context)} #${context.requestId.slice(0, 8)}`,
+      ),
+    )(c, next),
+  )
+})
 
 // Keep the local token-management endpoint outside the browser-facing CORS
 // middleware. The route itself rejects requests carrying an Origin header.

@@ -328,7 +328,24 @@ test("anthropic usage without cache counters shows cached as unknown", () => {
     type: "message",
     usage: { input_tokens: 10, output_tokens: 2 },
   })
+
   summary.finish()
   expect(lines[0].text).toContain("in 10 (cached ?)")
   expect(lines[0].text).not.toContain("%")
+})
+
+test("gateway tags survive retries and appear on a failed request once", () => {
+  const summary = new RequestSummary("messages", "m", [
+    "compaction",
+    "subagent",
+  ])
+  summary.attempt("responses", "{}", 1)
+  summary.fetched()
+  summary.attempt("responses", "{}", 1)
+  summary.fetched()
+  summary.fail(new Error("upstream unavailable"))
+  summary.finish()
+  summary.finish()
+  expect(lines).toHaveLength(1)
+  expect(lines[0].text).toContain("attempts 2  compaction subagent  error:")
 })

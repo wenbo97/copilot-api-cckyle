@@ -7,7 +7,22 @@ import type {
   ResponseTool,
 } from "~/routes/responses/responses-types"
 
+import { InvalidRequestError } from "~/lib/error"
+
 import { truncateToolName, type ToolNameMap } from "./tool-name"
+
+export function anthropicParallelToolCalls(
+  choice: AnthropicMessagesPayload["tool_choice"],
+): false | undefined {
+  const disabled: unknown = choice?.disable_parallel_tool_use
+  if (disabled !== undefined && typeof disabled !== "boolean")
+    throw new InvalidRequestError(
+      "disable_parallel_tool_use must be a boolean.",
+      "invalid_value",
+      "tool_choice.disable_parallel_tool_use",
+    )
+  return disabled === true ? false : undefined
+}
 
 // =============================================================================
 // Shared Anthropic -> OpenAI Responses tool translation.

@@ -4,7 +4,14 @@ import consola from "consola"
 import { colors } from "consola/utils"
 import { randomUUID } from "node:crypto"
 
+import type { GatewayRequestTag } from "~/lib/gateway-hints"
+
 import { HTTPError } from "~/lib/error"
+import {
+  requestLogContext,
+  requestLogLabel,
+  type RequestLogContext,
+} from "~/lib/request-log-context"
 import { state } from "~/lib/state"
 import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
 
@@ -40,8 +47,10 @@ export class RequestSummary {
   private readonly started = performance.now()
   private readonly ingress: SummaryProtocol
   private readonly model: string
+  private readonly tags: ReadonlyArray<GatewayRequestTag>
+  private readonly logContext = requestLogContext()
   private egress?: SummaryProtocol
-  private requestId: string = randomUUID()
+  private requestId: string = this.logContext?.requestId ?? randomUUID()
   private signal?: AbortSignal
   private bodyBytes?: number
   private items?: number
@@ -59,9 +68,14 @@ export class RequestSummary {
 
   usage: SummaryUsage = {}
 
-  constructor(ingress: SummaryProtocol, model: string) {
+  constructor(
+    ingress: SummaryProtocol,
+    model: string,
+    tags: ReadonlyArray<GatewayRequestTag> = [],
+  ) {
     this.ingress = ingress
     this.model = model
+    this.tags = tags
   }
 
   useRequestId(requestId: string | undefined): void {
@@ -165,6 +179,8 @@ export class RequestSummary {
         outcome: this.outcome,
         errorDetail: this.errorDetail,
         requestId: this.requestId,
+        tags: this.tags,
+        logContext: this.logContext,
       })
       if (this.outcome === "completed") consola.success(line)
       else consola.warn(line)
@@ -370,6 +386,8 @@ export interface SummaryLine {
   outcome: string
   errorDetail?: string
   requestId: string
+  tags?: ReadonlyArray<GatewayRequestTag>
+  logContext?: RequestLogContext
 }
 
 export function formatSummary(line: SummaryLine): string {
@@ -398,6 +416,8 @@ export function formatSummary(line: SummaryLine): string {
       `${bytes(line.bodyBytes)}${line.items === undefined ? "" : `/${integer(line.items)} items`}`,
     )
   if (line.attempts > 1) parts.push(`attempts ${line.attempts}`)
+  if (line.tags?.length) parts.push(line.tags.join(" "))
+  if (line.logContext) parts.push(requestLogLabel(line.logContext))
   const outcome =
     line.errorDetail ? `${line.outcome}: ${line.errorDetail}` : line.outcome
   parts.push(

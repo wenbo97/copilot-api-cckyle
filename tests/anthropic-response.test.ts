@@ -15,6 +15,75 @@ const anthropicUsageSchema = z.object({
   output_tokens: z.number().int(),
 })
 
+const makeState = (): AnthropicStreamState => ({
+  messageStartSent: false,
+  contentBlockIndex: 0,
+  contentBlockOpen: false,
+  toolCalls: {},
+})
+const makeChunk = (
+  delta: ChatCompletionChunk["choices"][number]["delta"],
+  finish_reason: "tool_calls" | null = null,
+): ChatCompletionChunk => ({
+  id: "r",
+  created: 1,
+  model: "gpt",
+  choices: [{ index: 0, delta, finish_reason, logprobs: null }],
+})
+test("buffers fragmented tool identity and rejects changed or missing identity", () => {
+  const state = makeState()
+  translateChunkToAnthropicEvents(
+    makeChunk({
+      tool_calls: [{ index: 0, id: "a", function: { name: "read_" } }],
+    }),
+    state,
+  )
+  translateChunkToAnthropicEvents(
+    makeChunk({
+      tool_calls: [{ index: 0, function: { name: "file", arguments: "{}" } }],
+    }),
+    state,
+  )
+  const finished = translateChunkToAnthropicEvents(
+    makeChunk({}, "tool_calls"),
+    state,
+  )
+  expect(finished).toContainEqual({
+    type: "content_block_start",
+    index: 0,
+    content_block: { type: "tool_use", id: "a", name: "read_file", input: {} },
+  })
+  expect(
+    translateChunkToAnthropicEvents(makeChunk({}, "tool_calls"), state),
+  ).toEqual([])
+  expect(
+    translateChunkToAnthropicEvents(makeChunk({ content: "late" }), state).at(
+      -1,
+    )?.type,
+  ).toBe("error")
+
+  const changed = makeState()
+  translateChunkToAnthropicEvents(
+    makeChunk({ tool_calls: [{ index: 0, id: "a" }] }),
+    changed,
+  )
+  expect(
+    translateChunkToAnthropicEvents(
+      makeChunk({ tool_calls: [{ index: 0, id: "b" }] }),
+      changed,
+    ).at(-1)?.type,
+  ).toBe("error")
+  const missing = makeState()
+  translateChunkToAnthropicEvents(
+    makeChunk({ tool_calls: [{ index: 0, function: { arguments: "{}" } }] }),
+    missing,
+  )
+  expect(
+    translateChunkToAnthropicEvents(makeChunk({}, "tool_calls"), missing).at(-1)
+      ?.type,
+  ).toBe("error")
+})
+
 const anthropicContentBlockTextSchema = z.object({
   type: z.literal("text"),
   text: z.string(),

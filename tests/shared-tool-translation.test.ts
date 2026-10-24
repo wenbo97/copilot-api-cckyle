@@ -6,9 +6,32 @@ import { deriveAnthropicStopReason } from "../src/routes/_shared/stop-reason"
 import {
   anthropicToolsToResponses,
   anthropicToolChoiceToResponses,
+  anthropicParallelToolCalls,
 } from "../src/routes/_shared/tool-translation"
 
 describe("anthropicToolsToResponses", () => {
+  test("serial generation is an independent, validated restriction", () => {
+    expect(anthropicParallelToolCalls(undefined)).toBeUndefined()
+    expect(
+      anthropicParallelToolCalls({
+        type: "auto",
+        disable_parallel_tool_use: false,
+      }),
+    ).toBeUndefined()
+    expect(
+      anthropicParallelToolCalls({
+        type: "none",
+        disable_parallel_tool_use: true,
+      }),
+    ).toBe(false)
+    expect(() =>
+      anthropicParallelToolCalls({
+        type: "auto",
+        disable_parallel_tool_use: JSON.parse("null") as boolean,
+      }),
+    ).toThrow("must be a boolean")
+  })
+
   test("maps name/description/input_schema -> parameters", () => {
     expect(
       anthropicToolsToResponses([

@@ -2,7 +2,9 @@ import { expect, test } from "bun:test"
 
 import type { ResponseObject } from "~/routes/responses/responses-types"
 import type { ResponseStreamEvent } from "~/routes/responses/responses-types"
+import type { ChatCompletionResponse } from "~/services/copilot/create-chat-completions"
 
+import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
 import {
   createResponsesToAnthropicState,
   translateResponsesEventToAnthropicEvents,
@@ -29,6 +31,29 @@ const refusal = {
     },
   ],
 } as unknown as ResponseObject
+
+test("Chat refusal-only JSON is visible without overriding output truncation", () => {
+  const response: ChatCompletionResponse = {
+    id: "r",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt",
+    choices: [
+      {
+        index: 0,
+        finish_reason: "stop",
+        logprobs: null,
+        message: { role: "assistant", content: null, refusal: "Cannot help." },
+      },
+    ],
+  }
+  expect(translateToAnthropic(response)).toMatchObject({
+    content: [{ type: "text", text: "Cannot help." }],
+    stop_reason: "refusal",
+  })
+  response.choices[0].finish_reason = "length"
+  expect(translateToAnthropic(response).stop_reason).toBe("max_tokens")
+})
 
 test("completed refusal content is visible and has refusal stop reason", () => {
   expect(translateResponsesToAnthropic(refusal, "gpt-5.5")).toMatchObject({

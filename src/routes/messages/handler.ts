@@ -7,8 +7,10 @@ import { awaitApproval } from "~/lib/approval"
 import { inspectCacheIntent } from "~/lib/cache-intent"
 import { debugJson } from "~/lib/debug-log"
 import { pickEgress } from "~/lib/endpoint-router"
+import { gatewayHints, gatewayRequestTags } from "~/lib/gateway-hints"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { observeRequestLogIdentity } from "~/lib/request-log-context"
 import { RequestSummary } from "~/lib/request-summary"
 import { responsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
@@ -59,6 +61,7 @@ import { readMessagesUsage, type MessagesUsage } from "./usage-translation"
 
 export async function handleCompletion(c: Context) {
   let anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  observeRequestLogIdentity(anthropicPayload, c.req.raw.headers)
   preserveStreamingRequest(c.req.raw, anthropicPayload)
   await checkRateLimit(state, c.req.raw.signal)
   debugJson("Anthropic request payload:", () => anthropicPayload)
@@ -112,18 +115,32 @@ export async function handleCompletion(c: Context) {
   )
 }
 
+function messageSummary(c: Context, model: string, requestId?: string) {
+  const summary = new RequestSummary(
+    "messages",
+    model,
+    gatewayRequestTags(c.req.raw.headers),
+  )
+  summary.useRequestId(requestId)
+  return summary
+}
+
 async function handleCompletionViaChat(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   diagnostics: MessagesUsageDiagnostics,
 ) {
+  const summary = messageSummary(c, anthropicPayload.model)
   // Trace the original Anthropic request
   const traceTimestamp = await traceRequest({
     type: "anthropic",
+    request_id: summary.id,
+    gateway_hints: gatewayHints(c.req.raw.headers),
     original: anthropicPayload,
   })
 
-  const openAIPayload = translateToOpenAI(anthropicPayload)
+  const toolNames = createToolNameMap(anthropicPayload)
+  const openAIPayload = translateToOpenAI(anthropicPayload, toolNames)
   consola.info(
     `[Anthropic] Using model: "${anthropicPayload.model}" -> translated to: "${openAIPayload.model}"`,
   )
@@ -134,10 +151,7 @@ async function handleCompletionViaChat(
     await awaitApproval()
   }
 
-  const requestOptions = copilotRequestOptions(
-    c.req.raw.signal,
-    new RequestSummary("messages", anthropicPayload.model),
-  )
+  const requestOptions = copilotRequestOptions(c.req.raw.signal, summary)
   const trailerController = new AbortController()
   const response = await createChatCompletions(openAIPayload, {
     ...requestOptions,
@@ -146,7 +160,7 @@ async function handleCompletionViaChat(
 
   if (isNonStreaming(response)) {
     debugJson("Non-streaming response from Copilot:", () => response, 400)
-    const anthropicResponse = translateToAnthropic(response)
+    const anthropicResponse = translateToAnthropic(response, toolNames)
     diagnostics.finish(readMessagesUsage(response.usage, "chat"))
     debugJson("Translated Anthropic response:", () => anthropicResponse)
     // Trace the response (both OpenAI and translated Anthropic)
@@ -162,6 +176,7 @@ async function handleCompletionViaChat(
   }
 
   return streamMessagesFromChat(c, {
+    toolNames,
     response,
     requestOptions,
     trailerController,
@@ -188,14 +203,16 @@ async function handlePassthroughMessages(
 ) {
   consola.info(`[Anthropic] Using model: "${payload.model}" (passthrough)`)
 
+  const summary = messageSummary(c, payload.model)
   const traceTimestamp = await traceRequest({
     type: "anthropic-passthrough",
+    request_id: summary.id,
+    gateway_hints: gatewayHints(c.req.raw.headers),
     original: payload,
   })
 
   if (state.manualApprove) await awaitApproval()
 
-  const summary = new RequestSummary("messages", payload.model)
   diagnostics.setRequestId(summary.id)
   const finishDiagnostics = () =>
     diagnostics.finish(passthroughUsage(summary), () =>
@@ -308,18 +325,18 @@ async function handleCompletionViaResponses(
     payload,
   )
 
+  const summary = messageSummary(c, payload.model, origin?.requestId)
   const traceTimestamp = await traceRequest({
     type: "anthropic-via-responses",
+    request_id: summary.id,
+    gateway_hints: gatewayHints(c.req.raw.headers),
     original: payload,
     translated: responsesPayload,
   })
 
   if (state.manualApprove) await awaitApproval()
 
-  const requestOptions = copilotRequestOptions(
-    c.req.raw.signal,
-    new RequestSummary("messages", payload.model),
-  )
+  const requestOptions = copilotRequestOptions(c.req.raw.signal, summary)
   const response = await createResponses(responsesPayload, {
     ...requestOptions,
     responsesDiagnostics: origin,

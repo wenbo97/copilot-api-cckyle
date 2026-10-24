@@ -1,5 +1,15 @@
 # deps
 node_modules/
+build/
+coverage/
+*.log
+.env*
+!.env.example
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+.idea/
 
 # local env
 *.local
@@ -34,3 +44,5 @@ CACHE-EVALUATION.md
 CONTEXT.md
 
 .npmrc
+.specify/
+specs/

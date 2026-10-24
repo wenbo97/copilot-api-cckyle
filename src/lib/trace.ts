@@ -2,6 +2,7 @@ import consola from "consola"
 import fs from "node:fs/promises"
 import path from "node:path"
 
+import { requestLogContext } from "./request-log-context"
 import { state } from "./state"
 
 /**
@@ -47,7 +48,7 @@ export async function traceRequest(request: unknown): Promise<string | null> {
   const filepath = path.join(state.traceFolder, filename)
 
   try {
-    const content = JSON.stringify(request, null, 2)
+    const content = JSON.stringify(withLogContext(request), null, 2)
     await fs.writeFile(filepath, content, "utf8")
     consola.debug(`Trace request written: ${filepath}`)
     return timestamp
@@ -72,7 +73,7 @@ export async function traceResponse(
   const filepath = path.join(state.traceFolder, filename)
 
   try {
-    const content = JSON.stringify(response, null, 2)
+    const content = JSON.stringify(withLogContext(response), null, 2)
     await fs.writeFile(filepath, content, "utf8")
     consola.debug(`Trace response written: ${filepath}`)
   } catch (error) {
@@ -85,6 +86,7 @@ export async function traceResponse(
  * For streaming responses, we collect all chunks and write them at the end.
  */
 export class StreamTracer {
+  private readonly logContext = requestLogContext()
   private chunks: Array<unknown> = []
   private timestamp: string | null
 
@@ -107,6 +109,7 @@ export class StreamTracer {
       const content = JSON.stringify(
         {
           streaming: true,
+          ...(this.logContext ? { log_context: this.logContext } : {}),
           chunks: this.chunks,
         },
         null,
@@ -118,4 +121,16 @@ export class StreamTracer {
       consola.error("Failed to write trace streaming response:", error)
     }
   }
+}
+
+function withLogContext(value: unknown): unknown {
+  const context = requestLogContext()
+  if (
+    !context
+    || typeof value !== "object"
+    || value === null
+    || Array.isArray(value)
+  )
+    return value
+  return { ...value, log_context: context }
 }

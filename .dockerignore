@@ -11,3 +11,8 @@ tests/
 *.md
 
 .eslintcache
+*.log*
+.env*
+coverage/
+Dockerfile*
+.dockerignore

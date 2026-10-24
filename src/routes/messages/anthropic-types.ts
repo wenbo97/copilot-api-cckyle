@@ -19,6 +19,7 @@ export interface AnthropicMessagesPayload {
   tool_choice?: {
     type: "auto" | "any" | "tool" | "none"
     name?: string
+    disable_parallel_tool_use?: boolean
   }
   thinking?: {
     type: "enabled" | "adaptive" | "disabled"
@@ -26,6 +27,7 @@ export interface AnthropicMessagesPayload {
   }
   output_config?: {
     effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+    format?: { type: "json_schema"; schema: Record<string, unknown> }
     [key: string]: unknown
   }
   service_tier?: "auto" | "standard_only"
@@ -210,14 +212,15 @@ export interface AnthropicStreamState {
   usage?: MessagesUsage
   pendingStopReason?: AnthropicResponse["stop_reason"]
   terminalEmitted?: boolean
+  refusalSeen?: boolean
   messageStartSent: boolean
   contentBlockIndex: number
   contentBlockOpen: boolean
   toolCalls: {
     [openAIToolIndex: number]: {
-      id: string
-      name: string
-      anthropicBlockIndex: number
+      id?: string
+      name?: string
+      arguments: string
     }
   }
 }

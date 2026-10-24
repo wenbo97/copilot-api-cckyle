@@ -9,6 +9,7 @@ import { pickEgress } from "~/lib/endpoint-router"
 import { HTTPError } from "~/lib/error"
 import { resolveModelId } from "~/lib/model-identity"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { observeRequestLogIdentity } from "~/lib/request-log-context"
 import { RequestSummary } from "~/lib/request-summary"
 import { responsesDiagnosticOrigin } from "~/lib/responses-diagnostics"
 import { state } from "~/lib/state"
@@ -55,6 +56,7 @@ import {
 
 export async function handleResponses(c: Context) {
   let payload = await c.req.json<ResponsesPayload>()
+  observeRequestLogIdentity(payload, c.req.raw.headers)
   preserveStreamingRequest(c.req.raw, payload)
   await checkRateLimit(state, c.req.raw.signal)
   debugJson(

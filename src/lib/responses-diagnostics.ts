@@ -31,6 +31,7 @@ import {
   inspectCacheIntent,
 } from "~/lib/cache-intent"
 import { HTTPError, InvalidRequestError } from "~/lib/error"
+import { requestLogContext } from "~/lib/request-log-context"
 import { state } from "~/lib/state"
 import { ResponsesUpstreamError } from "~/services/copilot/responses-upstream-error"
 
@@ -71,7 +72,7 @@ export function responsesDiagnosticOrigin(
   try {
     const ingress = ingressForFingerprints(payload, ingressProtocol)
     return {
-      requestId: randomUUID(),
+      requestId: requestLogContext()?.requestId ?? randomUUID(),
       ingressProtocol,
       cacheIntent: inspectCacheIntent(payload, ingressProtocol),
       ingressFingerprints: fingerprints(ingress),
@@ -161,7 +162,8 @@ export class ResponsesDiagnostics {
     const origin =
       context.origin ?? responsesDiagnosticOrigin("responses", ingress)
     const ingressObservation = ingressSnapshot(ingress, origin)
-    this.requestId = origin?.requestId ?? randomUUID()
+    this.requestId =
+      origin?.requestId ?? requestLogContext()?.requestId ?? randomUUID()
     const history = diagnosticHistoryContext(ingress, origin)
     this.ingressHistory = history.ingress
     this.ingressHints = history.hints

@@ -243,6 +243,50 @@ serialized egress body; `items` counts messages or input items. Failed,
 cancelled and incomplete requests print as warnings with an outcome or error
 code.
 
+For Claude Code, enable `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` in the client
+settings passed with `claude --settings`. Messages ingress summaries then
+label confirmed `x-claude-code-request-class: compaction` or `subagent`;
+`x-claude-code-compaction: manual` also marks compaction. Missing or
+unrecognized hints are not guessed from prompt content. This observation
+works on all three Messages egress paths without forwarding the hints or
+changing the upstream body. With `--trace`, request files include
+`request_id` (matching the summary) and a bounded `gateway_hints` allowlist
+containing request class, compaction, session/prompt IDs and agent ID/type,
+not authorization headers.
+
+Access request/response lines and the final summary share a request ID and
+`[agent=claude-code session=<original-session-id> role=main]` or
+`[agent=codex session=<original-thread-id> role=subagent:?]`.
+`agent` identifies the client CLI (`claude-code`, `codex`, `other`, or
+`unknown`), not the selected model. Recognition uses explicit client headers
+or known User-Agent product names, not the request endpoint.
+The original session ID lets you match logs to the client's session list or
+resume ID (`claude --resume <session-id>` / `codex resume <thread-id>`), and
+stays the same across proxy restarts. Search the log for `session=<id>` to
+collect that conversation's requests and responses; `#<id>` pairs a single
+request with its response. Treat these local logs
+as containing session identifiers. Individual Claude subagents use a separate
+`role=subagent:<process-local fingerprint>/general-purpose` label.
+Request IDs also match diagnostics and the `log_context` in request/response
+trace files. Streaming access completion means HTTP headers were returned;
+the later summary records the stream's final outcome.
+
+For full Claude Code attribution, enable the gateway hint setting above in
+the **client**. Without it, supported `metadata.user_id` session formats can
+still populate the final summary/response log, but the initial request line
+may show `session=?` and individual subagents cannot be inferred. Codex uses
+explicit thread metadata when available; missing session or role identity
+prints `?`, never a guess based on model names or cache keys. A client that
+does not send a session identifier cannot be mapped to a particular session;
+the proxy does not invent a session title or infer it from prompts. Conflicting
+or malformed Codex metadata leaves session and role unknown.
+
+Cached input still occupies context. Compaction itself needs input headroom:
+measure its additional prompt and account for token-estimation error and
+any total-context/output reservation before choosing an auto-compact
+threshold. Retrying an already oversized compaction request unchanged does
+not make it fit; the proxy does not silently truncate history or switch models.
+
 ### Passive cache measurements
 
 Set `COPILOT_CACHE_DIAGNOSTICS=1` when starting the proxy to emit one
@@ -576,6 +620,42 @@ return local HTTP 400. Tool images set the Copilot vision header. Long tool name
 use request-scoped aliases across definitions, forced choices and history, with
 original names restored in JSON and SSE replies. Alias collisions return local
 HTTP 400; unknown upstream names are preserved.
+
+The Messages-to-Chat bridge buffers tool metadata and argument fragments until
+the finish frame, then emits each tool as one contiguous start/delta/stop block
+in tool-index order. This delays tool delivery, not ordinary text, and prevents
+interleaved parallel calls from writing to closed blocks. Interrupted or
+output-limited calls are not emitted as successful executable tools.
+Chat refusals remain visible in Messages JSON/SSE with `refusal` termination
+(output truncation still takes precedence). The Responses-to-Chat fallback
+uses distinct refusal content parts and `response.refusal.delta`/`done` events,
+including mixed text/refusal replies; refusal alone is not a transport failure.
+
+Both Messages GPT bridges preserve `output_config.format` when the catalog
+explicitly advertises structured outputs. A `json_schema` format becomes strict
+provider output named `messages_output`, independently of reasoning effort.
+The accepted subset is a root object, nested objects/arrays/scalars, nullable
+types, scalar enums, nested `anyOf`, and `title`/`description`. Objects require
+all declared properties and `additionalProperties: false`; arrays require a
+schema-valued `items`. References/definitions, other combinators, optional
+properties, and other constraints/annotations are rejected, never silently
+rewritten or dropped. Malformed values return local HTTP 400 `invalid_value`;
+unsupported constraints or missing capability return `unsupported_feature`,
+both with the offending field path. Provider-specific schema limits may still
+reject accepted schemas; provider errors are retained without a permissive retry.
+Native Messages formats bypass this GPT-only validation.
+
+`tool_choice.disable_parallel_tool_use: true` maps to
+`parallel_tool_calls: false` on both GPT bridges without changing automatic,
+required, forced, or disabled tool selection. False/omitted adds no restriction;
+other values return local HTTP 400. Disabling does not require a catalog
+capability for enabling parallel calls.
+
+Native Responses streaming keeps the first item ID per output index through
+added/delta/done events and completed/incomplete/failed output snapshots.
+Unanchored items, response/call IDs, arguments, and encrypted content are unchanged.
+These compatibility behaviors are covered by offline protocol fixtures, not
+live Copilot certification.
 
 The Messages-to-Responses bridge closes open content blocks before termination.
 Output-limit truncation maps to `max_tokens`, content filtering to `refusal`, and

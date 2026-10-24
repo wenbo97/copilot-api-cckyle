@@ -30,19 +30,23 @@ export class StreamItemIdNormalizer {
 
   /**
    * Returns the event with its item id rewritten to the per-index anchor when
-   * one is known. The `output_item.added` event seeds the anchor and is returned
-   * unchanged. Events without an integer `output_index`, or for an index whose
-   * anchor hasn't been seen yet, pass through untouched. Never mutates the input.
+   * one is known, including terminal snapshots. The first added event wins;
+   * unknown or invalid indices pass through untouched. Never mutates the input.
    */
   normalize<T extends StreamEvent>(event: T): T {
+    if (
+      event.type === "response.completed"
+      || event.type === "response.incomplete"
+      || event.type === "response.failed"
+    )
+      return this.normalizeSnapshot(event)
     const outputIndex = event.output_index
-    if (typeof outputIndex !== "number") return event
+    if (!validOutputIndex(outputIndex)) return event
 
-    // The added event carries the canonical id — record it, forward as-is.
     if (event.type === "response.output_item.added") {
-      const id = (event.item as { id?: unknown } | undefined)?.id
-      if (typeof id === "string") this.anchors.set(outputIndex, id)
-      return event
+      const id = isRecord(event.item) ? event.item.id : undefined
+      if (!this.anchors.has(outputIndex) && typeof id === "string")
+        this.anchors.set(outputIndex, id)
     }
 
     const stable = this.anchors.get(outputIndex)
@@ -55,13 +59,39 @@ export class StreamItemIdNormalizer {
 
     // `output_item.done` instead nests the id under `item.id`.
     if (
-      event.type === "response.output_item.done"
-      && event.item
-      && typeof event.item === "object"
+      (event.type === "response.output_item.done"
+        || event.type === "response.output_item.added")
+      && isRecord(event.item)
+      && event.item.id !== stable
     ) {
       return { ...event, item: { ...event.item, id: stable } }
     }
 
     return event
   }
+
+  private normalizeSnapshot<T extends StreamEvent>(event: T): T {
+    const response = event.response
+    if (!isRecord(response) || !Array.isArray(response.output)) return event
+    return {
+      ...event,
+      response: {
+        ...response,
+        output: response.output.map((item: unknown, index: number) => {
+          const stable = this.anchors.get(index)
+          return stable !== undefined && isRecord(item) ?
+              { ...item, id: stable }
+            : item
+        }),
+      },
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function validOutputIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
 }

@@ -268,6 +268,7 @@ export interface ResponseStreamState {
   // can carry the real message instead of an empty placeholder. Optional so the
   // handler's state literal needs no change (the translator defaults it).
   textContent?: string
+  messageParts?: Array<ResponseOutputContent>
   // Whether a text message output item was opened (text arrived before any tool
   // call). Drives whether we emit the text .done frames at finish.
   messageItemOpen?: boolean

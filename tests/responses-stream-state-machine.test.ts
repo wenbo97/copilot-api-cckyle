@@ -63,6 +63,43 @@ const findTerminal = (
   return terminal
 }
 
+test("keeps refusal parts sequential, indexed and identical in done snapshots", () => {
+  const state = freshState()
+  const events = [
+    ...translateChunkToResponseEvents(chunk({ refusal: "No " }), state),
+    ...translateChunkToResponseEvents(chunk({ refusal: "thanks." }), state),
+    ...translateChunkToResponseEvents(
+      chunk({ content: " Alternative." }),
+      state,
+    ),
+    ...translateChunkToResponseEvents(chunk({}, "stop"), state),
+    ...finishResponseStream(state),
+  ]
+  expect(
+    events
+      .filter((event) => event.type === "response.refusal.delta")
+      .map((event) => event.delta)
+      .join(""),
+  ).toBe("No thanks.")
+  expect(
+    events.filter((event) => event.type === "response.refusal.done"),
+  ).toMatchObject([{ content_index: 0, refusal: "No thanks." }])
+  const parts = events.filter(
+    (event) => event.type === "response.content_part.done",
+  )
+  expect(parts.map((event) => event.content_index)).toEqual([0, 1])
+  expect(findTerminal(events).response.output[0]).toMatchObject({
+    content: parts.map((event) => event.part),
+  })
+  expect(events.map((event) => event.sequence_number)).toEqual(
+    events.map((_, index) => index + 1),
+  )
+  const itemDone = events.find(
+    (event) => event.type === "response.output_item.done",
+  )
+  expect(itemDone?.item).toEqual(findTerminal(events).response.output[0])
+})
+
 describe("synthetic Responses stream state machine", () => {
   test("buffers split tool metadata and argument deltas without crashing", () => {
     const state = freshState()

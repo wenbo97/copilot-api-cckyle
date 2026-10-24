@@ -38,22 +38,25 @@ export async function pollAccessToken(
       continue
     }
 
-    const json = await response.json()
+    const json: unknown = await response.json()
     consola.debug("Polling access token response:", json)
 
-    const githubAccessToken = json as AccessTokenResponse
-    const { access_token } = githubAccessToken
+    if (typeof json !== "object" || json === null || Array.isArray(json)) {
+      throw new Error(
+        "Invalid GitHub access token response: expected an object.",
+      )
+    }
+    const accessToken = "access_token" in json ? json.access_token : undefined
+    if (accessToken !== undefined && typeof accessToken !== "string") {
+      throw new Error(
+        "Invalid GitHub access token response: access_token must be a string.",
+      )
+    }
 
-    if (access_token) {
-      return access_token
+    if (accessToken) {
+      return accessToken
     } else {
       await sleep(sleepDuration)
     }
   }
-}
-
-interface AccessTokenResponse {
-  access_token: string
-  token_type: string
-  scope: string
 }
