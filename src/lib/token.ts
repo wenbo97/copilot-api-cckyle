@@ -115,16 +115,21 @@ async function fetchCopilotTokenWithRetry(): Promise<{
   throw lastError
 }
 
-async function fetchTokenFromVscodeProxy(): Promise<{
+async function fetchTokenFromVscodeProxy(force = false): Promise<{
   token: string
   refresh_in: number
   expires_at: number
   sku?: string
 } | null> {
   try {
-    const response = await fetch(VSCODE_PROXY_TOKEN_URL, {
-      signal: AbortSignal.timeout(3000),
-    })
+    const response = await fetch(
+      force ? `${VSCODE_PROXY_TOKEN_URL}?force=true` : VSCODE_PROXY_TOKEN_URL,
+      {
+        // A forced exchange bypasses the bridge cache and may spend up to 10s
+        // waiting for GitHub, so allow more time than a cached token read.
+        signal: AbortSignal.timeout(force ? 15_000 : 3000),
+      },
+    )
     if (!response.ok) {
       return null
     }
@@ -143,13 +148,13 @@ async function fetchTokenFromVscodeProxy(): Promise<{
   }
 }
 
-async function refreshCopilotToken(): Promise<void> {
+async function refreshCopilotToken(force = false): Promise<void> {
   consola.debug("Refreshing Copilot token")
 
   // If no GitHub token (proxy-only mode), skip straight to VS Code proxy
   if (!state.githubToken) {
     consola.debug("No GitHub token, trying VS Code proxy directly")
-    const proxyResult = await fetchTokenFromVscodeProxy()
+    const proxyResult = await fetchTokenFromVscodeProxy(force)
     if (proxyResult) {
       applyCopilotToken(proxyResult.token, proxyResult.expires_at)
       if (proxyResult.sku?.includes("enterprise")) {
@@ -214,7 +219,7 @@ async function refreshCopilotToken(): Promise<void> {
 
   // Attempt 3: try VS Code proxy (if VS Code extension is running)
   consola.warn("Trying VS Code proxy for token...")
-  const proxyResult = await fetchTokenFromVscodeProxy()
+  const proxyResult = await fetchTokenFromVscodeProxy(force)
   if (proxyResult) {
     applyCopilotToken(proxyResult.token, proxyResult.expires_at)
     if (proxyResult.sku?.includes("enterprise")) {
@@ -285,15 +290,19 @@ export async function ensureCopilotToken(force = false): Promise<void> {
     }
   }
 
-  consola.warn(
-    state.copilotToken ?
-      "Copilot token expired or expiring soon, refreshing on-demand"
-    : "No valid Copilot token, attempting refresh",
-  )
+  if (force) {
+    consola.warn("Copilot token refresh forced after authentication failure")
+  } else {
+    consola.warn(
+      state.copilotToken ?
+        "Copilot token expired or expiring soon, refreshing on-demand"
+      : "No valid Copilot token, attempting refresh",
+    )
+  }
 
   // Coalesce concurrent refresh attempts into one
   if (!refreshPromise) {
-    refreshPromise = refreshCopilotToken().finally(() => {
+    refreshPromise = refreshCopilotToken(force).finally(() => {
       refreshPromise = null
     })
   }

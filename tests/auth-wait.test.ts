@@ -138,6 +138,69 @@ test("an unavailable refresh never sends an expired credential upstream", async 
 })
 
 test.each([false, true])(
+  "VS Code bridge replaces a rejected cached credential (after401=%s)",
+  async (after401) => {
+    const timerSpy = captureTimers()
+    const bridgeRequests: Array<string> = []
+    const upstreamTokens: Array<string | null> = []
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600
+    Object.assign(state, {
+      githubToken: undefined,
+      copilotToken: "rejected-cached-token",
+      copilotTokenExpiresAt: after401 ? expiresAt : 1,
+    })
+    globalThis.fetch = Object.assign(
+      (url: string | URL | Request, init?: RequestInit) => {
+        const target = new URL(requestUrl(url))
+        if (target.hostname === "127.0.0.1" && target.pathname === "/token") {
+          bridgeRequests.push(target.search)
+          return Promise.resolve(
+            Response.json({
+              token:
+                !after401 || target.searchParams.get("force") === "true" ?
+                  "fresh-token"
+                : "rejected-cached-token",
+              expires_at: expiresAt,
+              refresh_in: 3600,
+            }),
+          )
+        }
+        if (target.pathname !== "/responses")
+          throw new Error("Unexpected offline request")
+        const authorization = new Headers(init?.headers).get("authorization")
+        upstreamTokens.push(authorization)
+        return Promise.resolve(
+          authorization === "Bearer fresh-token" ?
+            Response.json({ ok: true })
+          : Response.json(
+              {
+                error: {
+                  message:
+                    "You do not have access to the organization tied to the API key.",
+                  code: "authentication_failed",
+                },
+              },
+              { status: 401 },
+            ),
+        )
+      },
+      { preconnect: originalFetch.preconnect },
+    )
+    try {
+      expect((await copilotFetch("/responses")).status).toBe(200)
+      expect(bridgeRequests).toEqual([after401 ? "?force=true" : ""])
+      expect(upstreamTokens).toEqual(
+        after401 ?
+          ["Bearer rejected-cached-token", "Bearer fresh-token"]
+        : ["Bearer fresh-token"],
+      )
+    } finally {
+      timerSpy.mockRestore()
+    }
+  },
+)
+
+test.each([false, true])(
   "token exchange has a service deadline including body reads (body=%s)",
   async (body) => {
     const deadline = new AbortController()
